@@ -34,7 +34,13 @@
  * Send return n bytes <-> n bytes were copyied to TCP/IP stack (a'ka sk_buffer)
    Ref: http://stackoverflow.com/questions/5106674/error-address-already-in-use-while-binding-socket-with-address-but-the-port-num
 
-   TO DO: what about iteration in resolving_name?
+ * Name resolving in resolve_name_and_bind works only for IPv4 (sin_family = AF_INET) address.
+   So using getaddrinfo + iterating over result list would be redundant IMO.
+
+ * code bloat from std::function reason occurs only in debug build with symbols (350kB). For -Ofast without -g
+   binary size is only ~30kB so as small as without std::function
+
+ * std::function solves problem with bind to function pointer conversion
 */
 
 //void read_handler(int bytes_transferred, connection_data *connection);

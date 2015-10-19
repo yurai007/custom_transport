@@ -2,6 +2,7 @@
 #define CUSTOM_TRANSPORT_HPP
 
 #include <sys/epoll.h>
+#include <functional>
 
 #define MAXCONN 200
 #define MAXEVENTS 128
@@ -12,13 +13,13 @@ struct connection_data
     int fd;
     uint32_t event;
     char data[MAXLEN];
-    int length;
+	int length, from;
 };
 
-typedef void(*t_accept_handler)(int error, connection_data *,
-                                const char *address, const char *port);
-typedef void(*t_read_handler)(int bytes_transferred, connection_data *);
-typedef void(*t_write_handler)(int bytes_transferred, connection_data *);
+typedef std::function<void(int error, connection_data *,
+								const char *address, const char *port)> t_accept_handler;
+typedef std::function<void(int bytes_transferred, connection_data *)> t_read_handler;
+typedef std::function<void(int bytes_transferred, connection_data *)> t_write_handler;
 
 extern t_accept_handler global_accept_handler;
 extern t_read_handler global_read_handler;

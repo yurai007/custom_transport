@@ -59,7 +59,7 @@ static int resolve_name_and_bind (int port)
 
     bzero(&server_addr, sizeof(server_addr));
 
-    server_addr.sin_family = AF_INET;
+	server_addr.sin_family = AF_INET; // IPv4 only
     server_addr.sin_port = htons(port);
     server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
@@ -71,7 +71,8 @@ static int resolve_name_and_bind (int port)
 
 static void handle_reading_data_from_event(connection_data *connection, int epoll_fd)
 {
-    int n = read(connection->fd, connection->data, MAXLEN);
+	assert(connection->from <= MAXLEN);
+	int n = read(connection->fd, connection->data + connection->from, MAXLEN - connection->from);
 
     if(n == 0)
     {
@@ -80,23 +81,24 @@ static void handle_reading_data_from_event(connection_data *connection, int epol
 		connection = NULL;
 
         if (global_read_handler != NULL)
-            (*global_read_handler)(n, NULL);
+			global_read_handler(n, NULL);
     }
     else
     {
         assert(n > 0);
 
         connection->length = n;
-        connection->data[connection->length] = 0;
+		//connection->data[connection->length] = 0;
 
         if (global_read_handler != NULL)
-            (*global_read_handler)(n, connection);
+			global_read_handler(n, connection);
     }
 }
 
 static void handle_writing_data_to_event(connection_data *connection, int epoll_fd)
 {
-    int n = write(connection->fd, connection->data, connection->length);
+	assert(connection->length + connection->from <= MAXLEN);
+	int n = write(connection->fd, connection->data + connection->from, connection->length);
 
     assert( !((n == -1 && errno == EINTR) || (n < connection->length)) );
     if(n == -1)
@@ -106,13 +108,13 @@ static void handle_writing_data_to_event(connection_data *connection, int epoll_
 		connection = NULL;
 
         if (global_write_handler != NULL)
-            (*global_write_handler)(n, NULL);
+			global_write_handler(n, NULL);
     }
     else
     {
-        connection->data[n] = 0;
+		//connection->data[n] = 0;
         if (global_write_handler != NULL)
-            (*global_write_handler)(n, connection);
+			global_write_handler(n, connection);
     }
 }
 
@@ -144,11 +146,12 @@ static void handle_accepting_connection(int server_fd, int epoll_fd)
 
     make_socket_non_blocking(client_fd);
 
+	// I assume connection->begin = 0
     connection_data* connection = (connection_data*) calloc(1, sizeof(connection_data));
     connection->fd = client_fd;
 
     if (global_accept_handler != NULL)
-        (*global_accept_handler)(error_code, connection, client_address, client_port);
+		global_accept_handler(error_code, connection, client_address, client_port);
 }
 
 void init(int port)

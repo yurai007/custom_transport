@@ -1,14 +1,13 @@
 #include "epoll_server.hpp"
 #include "logger.hpp"
 
-void read_handler(int bytes_transferred, connection_data *connection);
-
 void epoll_server::write_handler(int bytes_transferred, connection_data *connection)
 {
 	if (bytes_transferred >= 0)
 	{
 		logger_.log("server: connection on socket = %d: sent %d B", connection->fd, bytes_transferred);
-		async_read(read_handler, connection);
+		connection->from = 0;
+		async_read(my_boost::my_bind(&epoll_server::read_handler, *this, my_boost::_1), connection);
 	}
 	else
 	{
@@ -24,6 +23,7 @@ void epoll_server::read_handler(int bytes_transferred, connection_data *connecti
 	}
 	else
 	{
+		current_connection = connection;
 		// no problem with strict aliasing because connection->data type is char*
 		private_data *data = reinterpret_cast<private_data*>(connection->data);
 		unsigned char msg_length = 0;
@@ -49,19 +49,17 @@ void epoll_server::read_handler(int bytes_transferred, connection_data *connecti
 			// so I want read to arbitrary choosed point in data and arbitrary number of bytes.
 			// But what if I will send on client side 1GB of data. ET must read all data but I only read
 			// MAXLEN/arbitrary bytes number. Is it OK? What about lost of data?
-			async_read(read_handler, connection);
-
-//			socket.async_read_some(buffer(&data_buffer.m_byte_buffer[current], remaining_bytes),
-//								   boost::bind(&connection::handle_read, this, placeholders::error,
-//											   placeholders::bytes_transferred));
+			connection->from = data->current;
+			async_read(my_boost::my_bind(&epoll_server::read_handler, *this, my_boost::_1), connection);
 		}
 		else
 		{
+			assert(dispatcher != nullptr);
 			logger_.log("server: connection on socket = %d: recieved %d B and expected %d B. Got full msg",
 						connection->fd, bytes_transferred, bytes_transferred);
 
 			data->data_buffer.offset = 1;
-			//m_server.dispatch_msg_from_buffer(data->data_buffer);
+			dispatcher->dispatch_msg_from_buffer(data->data_buffer);
 		}
 	}
 }
@@ -73,7 +71,7 @@ void epoll_server::accept_handler(int error, connection_data *connection,
     {
 		logger_.log("Accepted connection on descriptor %d "
 			   "(host=%s, port=%s)", connection->fd, address, port);
-        async_read(read_handler, connection);
+		async_read(my_boost::my_bind(&epoll_server::read_handler, *this, my_boost::_1), connection);
     }
     else
     {
@@ -82,9 +80,16 @@ void epoll_server::accept_handler(int error, connection_data *connection,
 }
 
 epoll_server::epoll_server(int port)
+	: current_connection(nullptr),
+	  dispatcher(nullptr)
 {
-    async_accept(accept_handler);
-    init(port);
+	async_accept(my_boost::my_bind(&epoll_server::accept_handler, *this, my_boost::_1));
+	init(port);
+}
+
+void epoll_server::add_dispatcher(std::shared_ptr<networking::message_dispatcher> dispatcher)
+{
+	this->dispatcher = dispatcher;
 }
 
 void epoll_server::run()
@@ -94,11 +99,11 @@ void epoll_server::run()
 
 void epoll_server::send_on_current_connection(const serialization::byte_buffer &data)
 {
-	// TO DO: I need connection_data context for async_write
+	assert(current_connection != nullptr);
+	private_data *connection = reinterpret_cast<private_data*>(current_connection->data);
+	connection->data_buffer = data;
 
-//	data_buffer = data;
-//    async_write(socket,
-//                buffer(&data_buffer.m_byte_buffer[0], data_buffer.offset),
-//                boost::bind(&connection::handle_write, this, placeholders::error,
-//                            placeholders::bytes_transferred));
+	current_connection->from = 0;
+	current_connection->length = connection->data_buffer.offset;
+	async_write(my_boost::my_bind(&epoll_server::write_handler, *this, my_boost::_1), current_connection);
 }
