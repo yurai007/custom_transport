@@ -7,7 +7,7 @@ program_CXX_SRCS := $(wildcard $(PATH_TO_EXT_SOURCES)*.cpp $(PATH_TO_SOURCES)*.c
 program_CXX_OBJS := ${program_CXX_SRCS:.cpp=.o}
 program_OBJS := $(program_CXX_OBJS)
 program_INCLUDE_DIRS := /home/djurczak/Downloads/boost_1_58_0
-program_INCLUDE_DIRS2 := /home/djurczak/Downloads/boost_1_58_0/process/boost-process
+program_INCLUDE_DIRS2 := /home/djurczak/Downloads/boost_1_58_0/boost_process
 program_LIBRARY_DIRS := /home/djurczak/Downloads/boost_1_58_0/bin.v2/libs/system/build/gcc-5.2.0/release/link-static/threading-multi
 program_LIBRARIES := boost_system
 

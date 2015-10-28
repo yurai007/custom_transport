@@ -12,7 +12,10 @@
    we have socket.read_some(boost::asio::buffer(data), error);
    Here data can't be std::string - so I used std::array.
    Ref: http://stackoverflow.com/questions/4068249/how-to-use-stdstring-with-asiobuffer
+
  * Boost process is not part of boost:) Boost Process is header only so linker will be happy.
+   Library is quite old and has many incompatible versions. I use version 0.5 from process.zip from SO:
+   http://stackoverflow.com/questions/1683665/where-is-boost-process
  */
 
 namespace echo_server_component_tests
@@ -52,7 +55,7 @@ public:
 	std::string read()
 	{
 		boost::system::error_code error;
-		std::array<char, max_buffer_size> data;
+		static std::array<char, max_buffer_size> data;
 
 		size_t recieved_bytes = socket.read_some(boost::asio::buffer(data), error);
 //		TO DO: why does it block?
@@ -67,22 +70,14 @@ public:
 	boost::asio::io_service io_service;
 	tcp::resolver resolver {io_service};
 	tcp::socket socket {io_service};
-	constexpr static int max_buffer_size = 128;
+	constexpr static int max_buffer_size = 1024*1024*16;
 };
 
 using namespace boost::process;
+using namespace boost::process::initializers;
 
 void dummy_test1()
 {
-	// current version - 0.5:
-	// ref: http://www.highscore.de/boost/process0.5/boost_process/tutorial.html#boost_process.tutorial.synchronous_i_o
-
-	// TO DO: I need zip from http://stackoverflow.com/questions/1683665/where-is-boost-process
-
-	// TO DO: compilation error for boost::process classes - can't find execute
-	// execute(run_exe("../echo_server/echo_server 5555"));
-
-	// start server
 	const std::string request1 = "Hello!";
 	const std::string request2 = "World!";
 	const std::string request3 = "Now";
@@ -124,10 +119,67 @@ void dummy_test2()
 	assert(client2.read() == request[2]);
 }
 
+void stress_test__one_big_request()
+{
+	const std::string request_fragment = "0123456789101112131415161718";
+	std::string big_request;
+	for (int i = 0; i < 10000; i++)
+		big_request.append(request_fragment);
+
+	synchronous_client client("127.0.0.1", "5555");
+	client.send(big_request);
+	assert(client.read() == big_request);
+}
+
+void stress_test__many_small_requests()
+{
+	std::string request;
+	synchronous_client client("127.0.0.1", "5555");
+
+	for (int i = 0; i < 100000; i++)
+	{
+		request = std::to_string(i);
+		client.send(request);
+		assert(client.read() == request);
+	}
+}
+
+void stress_test__increased_size_requests()
+{
+	std::string request = "*";
+	synchronous_client client("127.0.0.1", "5555");
+
+	for (int i = 0; i < 1000; i++)
+	{
+		client.send(request);
+		assert(client.read() == request);
+		request.append("*");
+	}
+
+	for (int i = 0; i < 1000; i++)
+	{
+		client.send(request);
+		assert(client.read() == request);
+		request.pop_back();
+	}
+}
+
 void tests()
 {
+	auto server_process = execute(
+				run_exe("../echo_server/echo_server"),
+				set_cmd_line("../echo_server/echo_server 5555")
+				);
+	sleep(1);
+
 	dummy_test1();
 	dummy_test2();
+	stress_test__one_big_request();
+	stress_test__many_small_requests();
+	stress_test__increased_size_requests();
+
+	terminate(server_process);
+
 	logger_.log("All tests passed");
 }
 
