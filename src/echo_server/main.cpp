@@ -49,7 +49,8 @@ void write_handler(int bytes_transferred, connection_data *connection)
 {
 	if (bytes_transferred >= 0)
 	{
-		logger_.log("Send all data to client socket = %d: %s", connection->fd, connection->data);
+		logger_.log("Send back %d bytes. Send all data to client socket = %d: %.*s", bytes_transferred,
+					connection->fd, bytes_transferred, connection->data);
 		async_read(read_handler, connection);
 	}
 }
@@ -67,7 +68,8 @@ void read_handler(int bytes_transferred, connection_data *connection)
 	}
 	else
 	{
-		logger_.log("Data from client socket = %d: %s", connection->fd, connection->data);
+		logger_.log("Recieved %d bytes. Data from client socket = %d: %.*s", bytes_transferred,
+					connection->fd, bytes_transferred, connection->data);
 		prepare_echo_response(connection);
 	}
 }

@@ -14,7 +14,7 @@ public:
 
     static logger& get()
     {
-		static logger instance(true, false, true, false);
+		static logger instance(true, true, true, false);
         return instance;
     }
 
@@ -37,7 +37,7 @@ private:
 
     const bool on, write_to_file, write_date;
     bool in_place;
-    static const int max_log_size = 128;
+	static const int max_log_size = 128*1024;
     char buffer[max_log_size];
     FILE * file_proxy = nullptr;
     std::mutex mutex;
