@@ -12,35 +12,38 @@ class logger
 {
 public:
 
-    static logger& get()
-    {
+	static logger& get()
+	{
 		static logger instance(true, true, true, false);
-        return instance;
-    }
+		return instance;
+	}
 
-    void log(const char *string, ...);
-    void log_in_place(const char *string, ...);
+	void log(const char *string, ...);
+	void log_in_place(const char *string, ...);
+	void enable(bool enabled);
 
 private:
 
-    logger(bool enabled, bool log_to_file, bool log_date, bool log_in_place);
+	logger(bool enabled, bool log_to_file, bool log_date, bool log_in_place);
 
-    template<class Msg>
-    void log_message(const Msg &msg)
-    {
-        log("Message: {name = \"%s\", id = %d}", msg.name.c_str(), msg.id);
-    }
+	template<class Msg>
+	void log_message(const Msg &msg)
+	{
+		log("Message: {name = \"%s\", id = %d}", msg.name.c_str(), msg.id);
+	}
 
-    ~logger();
+	~logger();
 
-    char *put_time_in_buffer();
+	char *put_time_in_buffer();
 
-    const bool on, write_to_file, write_date;
-    bool in_place;
-	static const int max_log_size = 128*1024;
-    char buffer[max_log_size];
-    FILE * file_proxy = nullptr;
-    std::mutex mutex;
+	bool on;
+	const bool write_to_file, write_date;
+	bool opened {false};
+	bool in_place;
+	static const int max_log_size = 128;
+	char buffer[max_log_size];
+	FILE * file_proxy = nullptr;
+	std::mutex mutex;
 };
 
 }

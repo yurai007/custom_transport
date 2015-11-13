@@ -112,7 +112,6 @@ static void handle_writing_data_to_event(connection_data *connection, int epoll_
     }
     else
     {
-		//connection->data[n] = 0;
         if (global_write_handler != NULL)
 			global_write_handler(n, connection);
     }
@@ -228,6 +227,12 @@ void async_accept( t_accept_handler accept_handler )
     global_accept_handler = accept_handler;
 }
 
+/*
+ * Reads all current available data in kernel for connection to connection buffer. There is no message concept
+   so from sender POV all data may be send (by async_write) in one call but from reciever POV there may be
+   need to perform many async_read (and vice versa). If caller won't copy data from connection or
+   won't move connection->from next async_read overwrite previous data in buffer.
+ */
 void async_read( t_read_handler read_handler, connection_data *connection)
 {
     assert(connection != NULL && epoll_fd != 0);
@@ -235,6 +240,12 @@ void async_read( t_read_handler read_handler, connection_data *connection)
     global_read_handler = read_handler;
 }
 
+/*
+ * Writes all data available in connection buffer (connection->length bytes) to kernel. There is no message concept
+   so from sender POV all data may be send in many calls (by async_write) but from reciever POV only one async_read
+   may be sufficient (and vice versa). If caller won't move connection->from and connection->length
+   next async_write send excatly the same data (but as I noticed behaviour on receiver side may be different).
+ */
 void async_write( t_write_handler write_handler, connection_data *connection)
 {
     assert(connection != NULL && epoll_fd != 0);

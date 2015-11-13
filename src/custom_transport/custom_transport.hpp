@@ -6,7 +6,7 @@
 
 #define MAXCONN 200
 #define MAXEVENTS 128
-#define MAXLEN (1024*512)
+#define MAXLEN (1024*1024*128)
 
 struct connection_data
 {

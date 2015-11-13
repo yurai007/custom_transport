@@ -31,7 +31,14 @@
  * the problem is that I won't be have never big enaugh buffer on server side so situations that
    1 send map to many recv will happen. Some allocation politics is needed.
 
+ * tests should be performed on remote machine as well
 
+ * logger is disabled on server side (there was problem - 'All tests passed' was placed in the middle
+   but not on the end of logs.
+
+ TODO:
+   - buffer allocation policy for very many clients. Starting with 512B, next allocations multiplies size by 2.
+   - semaphores instead sleep(1)
  */
 
 namespace echo_server_component_tests
@@ -89,11 +96,68 @@ public:
 	constexpr static int max_buffer_size = 1024*1024*16;
 };
 
+//class asynchronous_clients_set
+//{
+//public:
+//	asynchronous_clients_set(const std::string ip_address, const std::string &port,
+//							 int connections_number)
+//	{
+//		assert(connections_number <= 10000);
+
+//		for (int i = 0; i < connections_number; i++)
+//				   sockets.push_back(tcp::socket(io_service));
+
+//		tcp::resolver::query query(tcp::tcp::v4(), ip_address, port);
+//		resolver.async_resolve(query, boost::bind( &accept_handler,
+//					 placeholders::error, placeholders::bytes_transferred) );
+
+
+//	}
+
+//	void run()
+//	{
+//		try
+//		{
+//			io_service.run();
+//		}
+//		catch (std::exception& exception)
+//		{
+//			logger_.log("Exception: %s", exception.what());
+//		}
+//	}
+
+//private:
+
+//	void accept_handler(const boost::system::error_code &error_code,
+//						 ip::tcp::resolver::iterator endpoint_iterator)
+//	{
+//		if (!error_code)
+//		{
+//			for (int i = 0; i < connections_per_IP; i++)
+//			{
+//				int socket_index = connections_per_IP * p_interface_id + i;
+//				m_sockets[socket_index].async_connect(*endpoint_iterator, connect_handler);
+//			}
+//		}
+//		else
+//		{
+//			logger_.log("Connection accepting failed");
+//		}
+//	}
+
+
+//	boost::asio::io_service io_service;
+//	tcp::resolver resolver {io_service};
+//	std::vector<tcp::socket> sockets;
+//	constexpr static int max_buffer_size = 512;
+//};
+
 using namespace boost::process;
 using namespace boost::process::initializers;
 
 void dummy_test1()
 {
+	logger_.log("dummy_test1 is starting");
 	const std::string request1 = "Hello!";
 	const std::string request2 = "World!";
 	const std::string request3 = "Now";
@@ -109,6 +173,7 @@ void dummy_test1()
 
 void dummy_test2()
 {
+	logger_.log("dummy_test2 is starting");
 	const std::vector<std::string> request = {"json - ", "is an open standard format",
 											   "that uses human-readable text"};
 
@@ -135,11 +200,13 @@ void dummy_test2()
 	assert(client2.read() == request[2]);
 }
 
+// This test shows that one send may be mapped to many read-s
 void stress_test__one_big_request()
 {
+	logger_.log("stress_test__one_big_request is starting");
 	const std::string request_fragment = "0123456789101112131415161718";
 	std::string big_request;
-	for (int i = 0; i < 1000; i++)
+	for (int i = 0; i < 100000; i++)
 		big_request.append(request_fragment);
 
 	synchronous_client client("127.0.0.1", "5555");
@@ -159,6 +226,7 @@ void stress_test__one_big_request()
 
 void stress_test__many_small_requests()
 {
+	logger_.log("stress_test__many_small_requests is starting");
 	std::string request;
 	synchronous_client client("127.0.0.1", "5555");
 
@@ -172,22 +240,72 @@ void stress_test__many_small_requests()
 
 void stress_test__increased_size_requests()
 {
+	logger_.log("stress_test__increased_size_requests is starting");
 	std::string request = "*";
 	synchronous_client client("127.0.0.1", "5555");
 
-	for (int i = 0; i < 1000; i++)
+	for (int i = 0; i < 10000; i++)
 	{
 		client.send(request);
 		assert(client.read() == request);
 		request.append("*");
 	}
 
-	for (int i = 0; i < 1000; i++)
+	for (int i = 0; i < 10000; i++)
 	{
 		client.send(request);
 		assert(client.read() == request);
 		request.pop_back();
 	}
+}
+
+void stress_test__increased_size_big_requests()
+{
+	logger_.log("stress_test__increased_size_big_requests is starting");
+	synchronous_client client("127.0.0.1", "5555");
+
+	std::string request;
+	for (int i = 0; i < 40000; i++)
+		request.append("*");
+
+	for (int i = 40000; i < 41000; i++)
+	{
+		client.send(request);
+
+		int recieved_bytes = 0;
+		while (recieved_bytes < request.size())
+		{
+			auto response = client.read();
+
+			int pos = request.compare(recieved_bytes, response.size(), response);
+			assert(pos == 0);
+			recieved_bytes += response.size();
+		}
+
+		request.append("*");
+	}
+
+	for (int i = 40000; i < 41000; i++)
+	{
+		client.send(request);
+
+		int recieved_bytes = 0;
+		while (recieved_bytes < request.size())
+		{
+			auto response = client.read();
+
+			int pos = request.compare(recieved_bytes, response.size(), response);
+			assert(pos == 0);
+			recieved_bytes += response.size();
+		}
+
+		request.pop_back();
+	}
+}
+
+void stress_test__1k_clients()
+{
+	// TO DO: asynchronous_clients_set is needed
 }
 
 void tests()
@@ -202,7 +320,8 @@ void tests()
 	dummy_test2();
 	stress_test__one_big_request();
 	stress_test__many_small_requests();
-	//stress_test__increased_size_requests();
+	stress_test__increased_size_requests();
+	stress_test__increased_size_big_requests();
 
 	terminate(server_process);
 
