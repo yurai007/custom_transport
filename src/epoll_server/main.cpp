@@ -30,6 +30,8 @@
    2. Fortunately non-blocking call read/write guarantes that no interruption happen and no EINTR will
       be returned. Ref: http://stackoverflow.com/questions/14134440/eintr-and-non-blocking-calls
 
+ * epoll_create argument is ignored since linux 2.6.8 but must be grater than 0
+
  * Ctrl+C -> SIGINT
  * Send return n bytes <-> n bytes were copyied to TCP/IP stack (a'ka sk_buffer)
    Ref: http://stackoverflow.com/questions/5106674/error-address-already-in-use-while-binding-socket-with-address-but-the-port-num

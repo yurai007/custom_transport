@@ -6,14 +6,17 @@
 
 #define MAXCONN 200
 #define MAXEVENTS 128
-#define MAXLEN (1024*1024*128)
+//#define MAXLEN (1024*1024*128)
+#define MAXLEN (1024u*1024u)
+#define STARTLEN (512u)
 
 struct connection_data
 {
     int fd;
     uint32_t event;
-    char data[MAXLEN];
+	char *data;
 	int length, from;
+	size_t size;
 };
 
 typedef std::function<void(int error, connection_data *,

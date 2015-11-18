@@ -40,6 +40,35 @@ static int make_socket_non_blocking (int sfd)
     return 0;
 }
 
+static void reallocate_buffer_with_increased_size(connection_data *connection)
+{
+	size_t new_size = 2 * connection->size;
+	assert(new_size <= MAXLEN);
+
+	connection->data = (char *) realloc(connection->data, new_size);
+	assert(connection->data != NULL);
+	connection->size = new_size;
+}
+
+static connection_data *allocate_connection(int client_fd)
+{
+	connection_data* connection = (connection_data*) calloc(1, sizeof(connection_data));
+	assert(connection->from == 0);
+
+	connection->size = STARTLEN;
+	connection->data = (char*) calloc(1, connection->size);
+	connection->fd = client_fd;
+	return connection;
+}
+
+static void free_connection(connection_data *connection)
+{
+	close(connection->fd);
+	free(connection->data);
+	free(connection);
+	connection = NULL;
+}
+
 static void modify_epoll_context(int epoll_fd, int operation, int client_fd, uint32_t events, void *data)
 {
     epoll_event event;
@@ -69,16 +98,14 @@ static int resolve_name_and_bind (int port)
     return server_fd;
 }
 
-static void handle_reading_data_from_event(connection_data *connection, int epoll_fd)
+static void handle_reading_data_from_event(connection_data *connection)
 {
-	assert(connection->from <= MAXLEN);
-	int n = read(connection->fd, connection->data + connection->from, MAXLEN - connection->from);
+	assert((size_t)connection->from <= connection->size);
+	int n = read(connection->fd, connection->data + connection->from, connection->size - connection->from);
 
     if(n == 0)
     {
-        close(connection->fd);
-        free(connection);
-		connection = NULL;
+		free_connection(connection);
 
         if (global_read_handler != NULL)
 			global_read_handler(n, NULL);
@@ -86,26 +113,22 @@ static void handle_reading_data_from_event(connection_data *connection, int epol
     else
     {
         assert(n > 0);
-
         connection->length = n;
-		//connection->data[connection->length] = 0;
 
         if (global_read_handler != NULL)
 			global_read_handler(n, connection);
     }
 }
 
-static void handle_writing_data_to_event(connection_data *connection, int epoll_fd)
+static void handle_writing_data_to_event(connection_data *connection)
 {
-	assert(connection->length + connection->from <= MAXLEN);
+	assert(connection->length + connection->from <= (int)connection->size);
 	int n = write(connection->fd, connection->data + connection->from, connection->length);
 
     assert( !((n == -1 && errno == EINTR) || (n < connection->length)) );
     if(n == -1)
     {
-        close(connection->fd);
-        free(connection);
-		connection = NULL;
+		free_connection(connection);
 
         if (global_write_handler != NULL)
 			global_write_handler(n, NULL);
@@ -117,10 +140,10 @@ static void handle_writing_data_to_event(connection_data *connection, int epoll_
     }
 }
 
-static void handle_closing(int client_fd)
+static void handle_closing(connection_data *connection)
 {
-	logger_.log("Client associated with socket %d is gone...", client_fd);
-    close (client_fd);
+	logger_.log("Client associated with socket %d is gone...", connection->fd);
+	free_connection(connection);
 }
 
 static void handle_server_closing(int server_fd)
@@ -129,7 +152,7 @@ static void handle_server_closing(int server_fd)
     close (server_fd);
 }
 
-static void handle_accepting_connection(int server_fd, int epoll_fd)
+static void handle_accepting_connection(int server_fd)
 {
     sockaddr_in clientaddr;
     socklen_t clientlen = sizeof(clientaddr);
@@ -144,10 +167,7 @@ static void handle_accepting_connection(int server_fd, int epoll_fd)
                                   NI_NUMERICHOST | NI_NUMERICSERV);
 
     make_socket_non_blocking(client_fd);
-
-	// I assume connection->begin = 0
-    connection_data* connection = (connection_data*) calloc(1, sizeof(connection_data));
-    connection->fd = client_fd;
+	connection_data *connection = allocate_connection(client_fd);
 
     if (global_accept_handler != NULL)
 		global_accept_handler(error_code, connection, client_address, client_port);
@@ -160,7 +180,7 @@ void init(int port)
     int return_code = listen (server_fd, MAXCONN);
     check_errors("listen", return_code);
 
-    epoll_fd = epoll_create (MAXCONN);
+	epoll_fd = epoll_create (1);
     check_errors("epoll_create", epoll_fd);
 
     modify_epoll_context(epoll_fd, EPOLL_CTL_ADD, server_fd, EPOLLIN, &server_fd);
@@ -185,16 +205,14 @@ void run()
                     break;
                 }
 
-                handle_accepting_connection(server_fd, epoll_fd);
+				handle_accepting_connection(server_fd);
             }
             else
             {
                 if(events[i].events & EPOLLHUP || events[i].events & EPOLLERR)
                 {
                     connection_data* connection = (connection_data*) events[i].data.ptr;
-                    handle_closing(connection->fd);
-                    free(connection);
-					connection = NULL;
+					handle_closing(connection);
                 }
                 else if(EPOLLIN & events[i].events)
                 {
@@ -203,7 +221,7 @@ void run()
                     connection->event = EPOLLIN;
                     modify_epoll_context(epoll_fd, EPOLL_CTL_DEL, connection->fd, 0, 0);
 
-                    handle_reading_data_from_event(connection, epoll_fd);
+					handle_reading_data_from_event(connection);
                 }
                 else if(EPOLLOUT & events[i].events)
                 {
@@ -212,7 +230,7 @@ void run()
                     connection->event = EPOLLOUT;
                     modify_epoll_context(epoll_fd, EPOLL_CTL_DEL, connection->fd, 0, 0);
 
-                    handle_writing_data_to_event(connection, epoll_fd);
+					handle_writing_data_to_event(connection);
                 }
             }
         }

@@ -1,3 +1,6 @@
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
+#include <array>
 #include <boost/asio.hpp>
 #include <boost/process.hpp>
 #include <boost/bind.hpp>
@@ -17,7 +20,8 @@
    Library is quite old and has many incompatible versions. I use version 0.5 from process.zip from SO:
    http://stackoverflow.com/questions/1683665/where-is-boost-process
 
- * stress_test__one_big_request fails: Despite I set connection buffer size - MAXLEN to 1024*512 B, so it's big enaugh to hold request
+ * stress_test__one_big_request shows that one send may be mapped to many read-s on reciever side
+   stress_test__one_big_request fails: Despite I set connection buffer size - MAXLEN to 1024*512 B, so it's big enaugh to hold request
    echo_server sometimes gets full data (28k) and sometimes not (only 21.8k).
    Logs:
 
@@ -36,8 +40,15 @@
  * logger is disabled on server side (there was problem - 'All tests passed' was placed in the middle
    but not on the end of logs.
 
- TODO:
+ * OK. Issue with too many open files was fixed. Everything is fine if I on ROOT account set limits * - nofile 999999 in etc/security/limits.conf and
+   run ./tests and ./echo_server on ROOT!
+
+ * #pragma GCC diagnostic ignored "-Wdeprecated-declarations" for ignoring warnings from boost::process internals
+
+
+  TO DO:
    - buffer allocation policy for very many clients. Starting with 512B, next allocations multiplies size by 2.
+	 Finish implementation of this!
    - semaphores instead sleep(1)
  */
 
@@ -96,61 +107,118 @@ public:
 	constexpr static int max_buffer_size = 1024*1024*16;
 };
 
-//class asynchronous_clients_set
-//{
-//public:
-//	asynchronous_clients_set(const std::string ip_address, const std::string &port,
-//							 int connections_number)
-//	{
-//		assert(connections_number <= 10000);
+class asynchronous_clients_set
+{
+public:
 
-//		for (int i = 0; i < connections_number; i++)
-//				   sockets.push_back(tcp::socket(io_service));
+	constexpr static int max_buffer_size = 512;
+	constexpr static int log_step = 128;
 
-//		tcp::resolver::query query(tcp::tcp::v4(), ip_address, port);
-//		resolver.async_resolve(query, boost::bind( &accept_handler,
-//					 placeholders::error, placeholders::bytes_transferred) );
+	asynchronous_clients_set(const std::string ip_address, const std::string &port,
+							 int clients_number_,
 
+							 std::function<int(std::array<unsigned char, max_buffer_size>
+																	&connection_buffer, const int client_id)> test_send_handler,
 
-//	}
+							 std::function<void(const std::array<unsigned char, max_buffer_size>
+										 &connection_buffer, const int recieved_bytes, const int client_id)> test_read_handler
+							 )
+		: clients_number(clients_number_),
+		  external_send_handler(test_send_handler),
+		  external_read_handler(test_read_handler)
+	{
+		assert(clients_number <= 128*1024);
+		std::array<unsigned char, max_buffer_size> init_buffer;
 
-//	void run()
-//	{
-//		try
-//		{
-//			io_service.run();
-//		}
-//		catch (std::exception& exception)
-//		{
-//			logger_.log("Exception: %s", exception.what());
-//		}
-//	}
+		for (int i = 0; i < clients_number; i++)
+		{
+			sockets.push_back(tcp::socket(io_service));
+			connection_buffers.push_back(init_buffer);
+		}
 
-//private:
+		tcp::resolver::query query(tcp::tcp::v4(), ip_address, port);
+		resolver.async_resolve(query, boost::bind( &asynchronous_clients_set::accept_handler, this,
+					 boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred) );
+	}
 
-//	void accept_handler(const boost::system::error_code &error_code,
-//						 ip::tcp::resolver::iterator endpoint_iterator)
-//	{
-//		if (!error_code)
-//		{
-//			for (int i = 0; i < connections_per_IP; i++)
-//			{
-//				int socket_index = connections_per_IP * p_interface_id + i;
-//				m_sockets[socket_index].async_connect(*endpoint_iterator, connect_handler);
-//			}
-//		}
-//		else
-//		{
-//			logger_.log("Connection accepting failed");
-//		}
-//	}
+	void run()
+	{
+		try
+		{
+			io_service.run();
+		}
+		catch (std::exception& exception)
+		{
+			logger_.log("Exception: %s", exception.what());
+		}
+	}
 
+private:
 
-//	boost::asio::io_service io_service;
-//	tcp::resolver resolver {io_service};
-//	std::vector<tcp::socket> sockets;
-//	constexpr static int max_buffer_size = 512;
-//};
+	void write_handler(const boost::system::error_code &error_code, size_t bytes_transferred, int client_id)
+	{
+		if (!error_code)
+		{
+			assert(bytes_transferred > 0);
+			external_read_handler(connection_buffers[client_id], bytes_transferred, client_id);
+		}
+		else
+			assert(false);
+	}
+
+	void connect_handler(const boost::system::error_code &error_code)
+	{
+		static int client_id = 0;
+
+		if (!error_code)
+		{
+			++client_id;
+			if (client_id % log_step == 0)
+				logger_.log("Next %d clients were succesfuly connected to echo server", client_id);
+
+			int size = external_send_handler(connection_buffers[client_id-1], client_id-1);
+
+			boost::asio::async_write(sockets[client_id-1],
+					boost::asio::buffer(connection_buffers[client_id-1], size),
+					boost::bind(&asynchronous_clients_set::write_handler, this, boost::asio::placeholders::error,
+								boost::asio::placeholders::bytes_transferred, client_id-1));
+		}
+		else
+		{
+			logger_.log("Connecting external server failed with error = %d", error_code.value());
+			assert(false);
+		}
+	}
+
+	void accept_handler(const boost::system::error_code &error_code,
+						 tcp::resolver::iterator endpoint_iterator)
+	{
+		if (!error_code)
+		{
+			for (auto &socket : sockets)
+				socket.async_connect(*endpoint_iterator,
+									 boost::bind(&asynchronous_clients_set::connect_handler,
+												 this, boost::asio::placeholders::error));
+		}
+		else
+		{
+			logger_.log("Resolving external server failed");
+			assert(false);
+		}
+	}
+
+	boost::asio::io_service io_service;
+	tcp::resolver resolver {io_service};
+	std::vector<std::array<unsigned char, max_buffer_size>> connection_buffers;
+	std::vector<tcp::socket> sockets;
+	int clients_number;
+
+	const std::function<int(std::array<unsigned char, asynchronous_clients_set::max_buffer_size>
+										   &connection_buffer, const int client_id)> external_send_handler {nullptr};
+
+	const std::function<void(const std::array<unsigned char, asynchronous_clients_set::max_buffer_size>
+				&connection_buffer, const int recieved_bytes, const int client_id)> external_read_handler {nullptr};
+};
 
 using namespace boost::process;
 using namespace boost::process::initializers;
@@ -200,7 +268,6 @@ void dummy_test2()
 	assert(client2.read() == request[2]);
 }
 
-// This test shows that one send may be mapped to many read-s
 void stress_test__one_big_request()
 {
 	logger_.log("stress_test__one_big_request is starting");
@@ -303,9 +370,33 @@ void stress_test__increased_size_big_requests()
 	}
 }
 
-void stress_test__1k_clients()
+void stress_test__2k_clients()
 {
-	// TO DO: asynchronous_clients_set is needed
+	logger_.log("stress_test__2k_clients is starting");
+
+	const auto client_send_handler = [](std::array<unsigned char, asynchronous_clients_set::max_buffer_size>
+			&connection_buffer, const int client_id)
+	{
+		const std::string request = "Hello world from client = " + std::to_string(client_id) + " !";
+
+		assert(request.size() <= asynchronous_clients_set::max_buffer_size);
+		auto last = std::copy(request.begin(), request.end(), connection_buffer.begin());
+		return std::distance(connection_buffer.begin(), last);
+	};
+
+	const auto client_recv_handler = [](const std::array<unsigned char, asynchronous_clients_set::max_buffer_size>
+			&connection_buffer, const int recieved_bytes, const int client_id)
+	{
+
+		const std::string expected_response= "Hello world from client = " + std::to_string(client_id) + " !";
+		const std::string response(connection_buffer.begin(), connection_buffer.begin() + recieved_bytes);
+
+		assert(response == expected_response);
+	};
+
+	asynchronous_clients_set clients_pool("127.0.0.1", "5555", 2000, client_send_handler,
+										  client_recv_handler);
+	clients_pool.run();
 }
 
 void tests()
@@ -318,10 +409,11 @@ void tests()
 
 	dummy_test1();
 	dummy_test2();
-	stress_test__one_big_request();
-	stress_test__many_small_requests();
-	stress_test__increased_size_requests();
-	stress_test__increased_size_big_requests();
+//	stress_test__one_big_request();
+//	stress_test__many_small_requests();
+//	stress_test__increased_size_requests();
+//	stress_test__increased_size_big_requests();
+	stress_test__2k_clients();
 
 	terminate(server_process);
 

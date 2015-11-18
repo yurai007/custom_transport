@@ -97,7 +97,7 @@ int main(int argc, char* argv[])
         exit(EXIT_FAILURE);
     }
 
-	logger_.enable(false);
+	//logger_.enable(false);
 	async_accept(accept_handler);
 	int port = atoi(argv[1]);
 	init(port);
