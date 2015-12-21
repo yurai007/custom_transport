@@ -45,10 +45,30 @@
 
  * #pragma GCC diagnostic ignored "-Wdeprecated-declarations" for ignoring warnings from boost::process internals
 
+ * read_some
 
-  TO DO:
-   - buffer allocation policy for very many clients. Starting with 512B, next allocations multiplies size by 2.
-	 Finish implementation of this!
+ * ulimit sucks because it has influence only on current shell (that's why /etc/security/limits.conf).
+   For qtcreator I limited memory to 4GB by command:
+
+   (ulimit -v 4000000; /opt/Qt5.4.2/Tools/QtCreator/bin/./qtcreator)
+
+ * never ever use local static-s! However if you really want to use them think 10 times.
+   Local statics have limited scope but it's not like field with limited scope. There are much much worse
+   because introduce dependency between different object-s of the same type! I can create and destroy object but
+   part of state will be still hold in static.
+   This extreme memory consumpsion was caused by static buffer which was allocated only once (vector, wtf?)
+   fo 16MB and after that (and after destroying object) was used in next test by coping 2000x times
+
+ * using swap dramaticly degradates performance (e.g virtualbox, building seastar on my PC - 4gb memory).
+   Avoid it if possible.
+
+ * for offline work I must pass to query tcp::resolver::query::canonical_name
+
+
+  TO DO: 
+   - SIGINT/SIGTERM is not handled in echo_server so resources aren't free. Handle signals!
+   - server must be restarted every time
+   - gdb in qtcreator for root?
    - semaphores instead sleep(1)
  */
 
@@ -63,7 +83,7 @@ public:
 
 	synchronous_client(const std::string ip_address, const std::string &port)
 	{
-		tcp::resolver::query query(tcp::tcp::v4(), ip_address, port);
+		tcp::resolver::query query(ip_address, port, tcp::resolver::query::canonical_name);
 		tcp::resolver::iterator endpoint_iterator = resolver.resolve(query), end;
 		boost::system::error_code error = boost::asio::error::host_not_found;
 
@@ -81,8 +101,9 @@ public:
 		boost::system::error_code error;
 
 		size_t send_bytes = boost::asio::write(socket, boost::asio::buffer(msg, msg.size()), error);
-		assert(send_bytes > 0);
 		assert(!error);
+		assert(send_bytes > 0);
+
 		logger_.log("synchronous_client::  Sent %d bytes", send_bytes);
 	}
 
@@ -91,11 +112,17 @@ public:
 		boost::system::error_code error;
 		static std::array<char, max_buffer_size> data;
 
+		logger_.log("synchronous_client::  Start recieving...");
+		// TO DO: for some reason read_some doesn't recieve all data and blocks for one_big_request
 		size_t recieved_bytes = socket.read_some(boost::asio::buffer(data), error);
 //		TO DO: why does it block?
-//		size_t recieved_bytes = boost::asio::read(socket, boost::asio::buffer(data), error);
-		assert(recieved_bytes > 0 && recieved_bytes <= max_buffer_size );
+		//size_t recieved_bytes = boost::asio::read(socket, boost::asio::buffer(data), error);
+		//logger_.log("synchronous_client::  Error_code: %d", error.value());
+
 		assert(!error);
+		assert(recieved_bytes > 0);
+		assert(recieved_bytes <= max_buffer_size );
+
 		logger_.log("synchronous_client::  Recieved %d bytes", recieved_bytes);
 		std::string result(data.begin(), data.begin() + recieved_bytes);
 		return result;
@@ -111,34 +138,38 @@ class asynchronous_clients_set
 {
 public:
 
-	constexpr static int max_buffer_size = 512;
-	constexpr static int log_step = 128;
+	constexpr static int log_step = 1;
 
 	asynchronous_clients_set(const std::string ip_address, const std::string &port,
 							 int clients_number_,
+							 int max_buffer_size_,
 
-							 std::function<int(std::array<unsigned char, max_buffer_size>
+							 std::function<int(std::vector<unsigned char>
 																	&connection_buffer, const int client_id)> test_send_handler,
 
-							 std::function<void(const std::array<unsigned char, max_buffer_size>
+							 std::function<void(const std::vector<unsigned char>
 										 &connection_buffer, const int recieved_bytes, const int client_id)> test_read_handler
 							 )
 		: clients_number(clients_number_),
+		  max_buffer_size(max_buffer_size_),
 		  external_send_handler(test_send_handler),
-		  external_read_handler(test_read_handler)
+          external_read_handler(test_read_handler),
+          client_id(0)
 	{
 		assert(clients_number <= 128*1024);
-		std::array<unsigned char, max_buffer_size> init_buffer;
+		assert(clients_number*max_buffer_size <= 1024*1024*512);
+        std::vector<unsigned char> init_buffer(max_buffer_size);
 
 		for (int i = 0; i < clients_number; i++)
-		{
+        {
 			sockets.push_back(tcp::socket(io_service));
 			connection_buffers.push_back(init_buffer);
 		}
 
-		tcp::resolver::query query(tcp::tcp::v4(), ip_address, port);
+		tcp::resolver::query query(ip_address, port, tcp::resolver::query::canonical_name);
 		resolver.async_resolve(query, boost::bind( &asynchronous_clients_set::accept_handler, this,
 					 boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred) );
+		logger_.log("accept_handler was attached");
 	}
 
 	void run()
@@ -168,8 +199,6 @@ private:
 
 	void connect_handler(const boost::system::error_code &error_code)
 	{
-		static int client_id = 0;
-
 		if (!error_code)
 		{
 			++client_id;
@@ -209,15 +238,19 @@ private:
 
 	boost::asio::io_service io_service;
 	tcp::resolver resolver {io_service};
-	std::vector<std::array<unsigned char, max_buffer_size>> connection_buffers;
-	std::vector<tcp::socket> sockets;
-	int clients_number;
 
-	const std::function<int(std::array<unsigned char, asynchronous_clients_set::max_buffer_size>
+	int clients_number;
+	int max_buffer_size;
+	std::vector<std::vector<unsigned char>> connection_buffers;
+	std::vector<tcp::socket> sockets;
+
+	const std::function<int(std::vector<unsigned char>
 										   &connection_buffer, const int client_id)> external_send_handler {nullptr};
 
-	const std::function<void(const std::array<unsigned char, asynchronous_clients_set::max_buffer_size>
+	const std::function<void(const std::vector<unsigned char>
 				&connection_buffer, const int recieved_bytes, const int client_id)> external_read_handler {nullptr};
+
+    int client_id;
 };
 
 using namespace boost::process;
@@ -268,6 +301,7 @@ void dummy_test2()
 	assert(client2.read() == request[2]);
 }
 
+// request size about ~2.9MB
 void stress_test__one_big_request()
 {
 	logger_.log("stress_test__one_big_request is starting");
@@ -279,7 +313,7 @@ void stress_test__one_big_request()
 	synchronous_client client("127.0.0.1", "5555");
 	client.send(big_request);
 
-	int recieved_bytes = 0;
+	size_t recieved_bytes = 0;
 
 	while (recieved_bytes < big_request.size())
 	{
@@ -289,6 +323,72 @@ void stress_test__one_big_request()
 		assert(pos == 0);
 		recieved_bytes += response.size();
 	}
+}
+
+// request size about ~2.9MB
+void stress_test__one_big_request_async()
+{
+	logger_.log("stress_test__one_big_request_async is starting");
+
+	constexpr static int max_buffer_size = 1024*1024*16;
+
+	const auto client_send_handler = [](std::vector<unsigned char> &connection_buffer, const int client_id)
+	{
+		static bool once = false;
+		std::string big_request;
+
+		if (!once)
+		{
+			once = true;
+			const std::string request_fragment = "0123456789101112131415161718";
+
+			for (int i = 0; i < 100000; i++)
+				big_request.append(request_fragment);
+
+			assert(big_request.size() <= max_buffer_size);
+
+			auto last = std::copy(big_request.begin(), big_request.end(), connection_buffer.begin());
+			return std::distance(connection_buffer.begin(), last);
+		}
+		logger_.log("Shouldn't be here... Client_id = %d", client_id);
+		return 0L;
+	};
+
+	const auto client_recv_handler = [](const std::vector<unsigned char>
+			&connection_buffer, const int recieved_bytes, const int client_id)
+	{
+		logger_.log("Recv. Client_id = %d", client_id);
+		static bool once = false;
+		std::string big_request;
+
+		if (!once)
+		{
+			once = true;
+			const std::string request_fragment = "0123456789101112131415161718";
+
+			for (int i = 0; i < 100000; i++)
+				big_request.append(request_fragment);
+
+			assert(big_request.size() <= max_buffer_size);
+		}
+
+		static size_t sum_bytes = 0;
+
+		std::string response(connection_buffer.begin(), connection_buffer.begin() + recieved_bytes);
+		int pos = big_request.compare(sum_bytes, recieved_bytes, response);
+		assert(pos == 0);
+		sum_bytes += recieved_bytes;
+		logger_.log("OK. Recieved next %d bytes", recieved_bytes);
+
+			if (sum_bytes == big_request.size())
+			{
+				logger_.log("OK. Recieved all %d bytes", sum_bytes);
+			}
+	};
+
+	asynchronous_clients_set clients_pool("127.0.0.1", "5555", 1, max_buffer_size, client_send_handler,
+										  client_recv_handler);
+	clients_pool.run();
 }
 
 void stress_test__many_small_requests()
@@ -339,7 +439,7 @@ void stress_test__increased_size_big_requests()
 	{
 		client.send(request);
 
-		int recieved_bytes = 0;
+		size_t recieved_bytes = 0;
 		while (recieved_bytes < request.size())
 		{
 			auto response = client.read();
@@ -356,7 +456,7 @@ void stress_test__increased_size_big_requests()
 	{
 		client.send(request);
 
-		int recieved_bytes = 0;
+		size_t recieved_bytes = 0;
 		while (recieved_bytes < request.size())
 		{
 			auto response = client.read();
@@ -374,48 +474,98 @@ void stress_test__2k_clients()
 {
 	logger_.log("stress_test__2k_clients is starting");
 
-	const auto client_send_handler = [](std::array<unsigned char, asynchronous_clients_set::max_buffer_size>
+	constexpr static int max_buffer_size = 512;
+
+	const auto client_send_handler = [](std::vector<unsigned char>
 			&connection_buffer, const int client_id)
 	{
 		const std::string request = "Hello world from client = " + std::to_string(client_id) + " !";
 
-		assert(request.size() <= asynchronous_clients_set::max_buffer_size);
+		assert(request.size() <= max_buffer_size);
 		auto last = std::copy(request.begin(), request.end(), connection_buffer.begin());
 		return std::distance(connection_buffer.begin(), last);
 	};
 
-	const auto client_recv_handler = [](const std::array<unsigned char, asynchronous_clients_set::max_buffer_size>
+	const auto client_recv_handler = [](const std::vector<unsigned char>
 			&connection_buffer, const int recieved_bytes, const int client_id)
 	{
-
 		const std::string expected_response= "Hello world from client = " + std::to_string(client_id) + " !";
 		const std::string response(connection_buffer.begin(), connection_buffer.begin() + recieved_bytes);
 
 		assert(response == expected_response);
 	};
 
-	asynchronous_clients_set clients_pool("127.0.0.1", "5555", 2000, client_send_handler,
+	asynchronous_clients_set clients_pool("127.0.0.1", "5555", 2000, max_buffer_size, client_send_handler,
 										  client_recv_handler);
 	clients_pool.run();
 }
 
+void stress_test__2k_clients_increased_size_requests()
+{
+	logger_.log("stress_test__2k_clients_increased_size_requests is starting");
+
+	constexpr static int max_buffer_size = 10000;
+	constexpr static int clients_number = 2000;
+
+	std::vector<std::string> client_requests(clients_number, "");
+
+	for (size_t i = 0; i < client_requests.size(); i++)
+	{
+		client_requests[i] = "Hello world from client = " + std::to_string(i) + " *";
+	}
+
+	const auto client_send_handler = [&client_requests](auto &connection_buffer, const int client_id)
+	{
+		//const std::string request = "Hello world from client = " + std::to_string(client_id) + " !";
+
+		assert(client_requests[client_id].size() <= max_buffer_size);
+		auto last = std::copy(client_requests[client_id].begin(), client_requests[client_id].end(),
+							  connection_buffer.begin());
+
+		return std::distance(connection_buffer.begin(), last);
+	};
+
+	const auto client_recv_handler = [&client_requests](const auto &connection_buffer,
+			const int recieved_bytes, const int client_id)
+	{
+		const std::string response(connection_buffer.begin(), connection_buffer.begin() + recieved_bytes);
+
+		assert(response == client_requests[client_id]);
+	};
+
+	asynchronous_clients_set clients_pool("127.0.0.1", "5555", clients_number, max_buffer_size, client_send_handler,
+										  client_recv_handler);
+	clients_pool.run();
+}
+
+void dummy_test_case()
+{
+    // mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f6da5ccd000
+    long *ptr = (long*)malloc(sizeof(long));
+
+    // munmap(0x7f6da5cd0000, 150562) - it unmaps all mappings at once
+    free(ptr);
+}
+
+
 void tests()
 {
-	auto server_process = execute(
-				run_exe("../echo_server/echo_server"),
-				set_cmd_line("../echo_server/echo_server 5555")
-				);
-	sleep(1);
+//	auto server_process = execute(
+//				run_exe("../echo_server/echo_server"),
+//				set_cmd_line("../echo_server/echo_server 5555")
+//				);
+//	sleep(1);
+
 
 	dummy_test1();
 	dummy_test2();
-//	stress_test__one_big_request();
-//	stress_test__many_small_requests();
-//	stress_test__increased_size_requests();
-//	stress_test__increased_size_big_requests();
+	stress_test__one_big_request_async();
+	stress_test__many_small_requests();
+	stress_test__increased_size_requests();
+	stress_test__increased_size_big_requests();
 	stress_test__2k_clients();
 
-	terminate(server_process);
+//	terminate(server_process);
 
 	logger_.log("All tests passed");
 }

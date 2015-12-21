@@ -17,7 +17,7 @@
    SO_REUSEADDR option for the socket by setsockopt (nc do that:)).
    ss -tan | grepc [port] - shows sockets in TIME_WAIT state
 
- * For TCP non-blocking write/read with EPOLLET (edge-triggered) mode
+ * For TCP non-blocking write/read with EPOLLET (edge-triggered) mode and infinite size buffer
    1. TCP + EPOLLET guarantes that read always reads all available data so there is no sense to
       call read again in loop until return_code == -1 and errno == EAGAIN
       (We know that second call always return EAGAIN). Ref:
@@ -29,6 +29,8 @@
       All I said before would be true but signals...
    2. Fortunately non-blocking call read/write guarantes that no interruption happen and no EINTR will
       be returned. Ref: http://stackoverflow.com/questions/14134440/eintr-and-non-blocking-calls
+   3. However real buffer has always limited capacity. So there is possibility that read doesn't read
+	  all available data because of nbytes parameter. So finally loop is need here.
 
  * Ctrl+C -> SIGINT
  * Send return n bytes <-> n bytes were copyied to TCP/IP stack (a'ka sk_buffer)
@@ -49,8 +51,12 @@ void write_handler(int bytes_transferred, connection_data *connection)
 {
 	if (bytes_transferred >= 0)
 	{
-		logger_.log("Send back %d bytes. Send all data to client socket = %d: %.*s", bytes_transferred,
-					connection->fd, bytes_transferred, connection->data);
+		if (bytes_transferred <= 512)
+			logger_.log("Send back %d bytes. Send all data to client socket = %d: %.*s", bytes_transferred,
+					connection->fd, bytes_transferred, connection->data.bytes);
+		else
+			logger_.log("Send back %d bytes. Send all data to client socket = %d. ", bytes_transferred,
+					connection->fd);
 		async_read(read_handler, connection);
 	}
 }
@@ -68,8 +74,13 @@ void read_handler(int bytes_transferred, connection_data *connection)
 	}
 	else
 	{
-		logger_.log("Recieved %d bytes. Data from client socket = %d: %.*s", bytes_transferred,
-					connection->fd, bytes_transferred, connection->data);
+		if (bytes_transferred <= 512)
+			logger_.log("Recieved %d bytes. Data from client socket = %d: %.*s", bytes_transferred,
+					connection->fd, bytes_transferred, connection->data.bytes);
+		else
+			logger_.log("Recieved %d bytes. Data from client socket = %d. ", bytes_transferred,
+					connection->fd);
+
 		prepare_echo_response(connection);
 	}
 }

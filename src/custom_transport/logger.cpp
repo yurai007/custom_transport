@@ -30,9 +30,11 @@ void logger::log(const char *string, ...)
 
 	if (write_date && !in_place)
 		current_pos = put_time_in_buffer();
+
 	va_list args;
 	va_start (args, string);
-	vsnprintf (current_pos, max_log_size, string, args);
+	int return_code = vsnprintf (current_pos, max_line_size, string, args);
+	assert(return_code >= 0);
 	va_end (args);
 
 	if (write_to_file)
@@ -65,7 +67,7 @@ void logger::log(const char *string, ...)
 		 current_pos = put_time_in_buffer();
 	 va_list args;
 	 va_start (args, string);
-	 vsnprintf (current_pos, max_log_size, string, args);
+	 vsnprintf (current_pos, max_line_size, string, args);
 	 va_end (args);
 
 	 if (write_to_file)

@@ -13,12 +13,15 @@
 #include <netdb.h>
 #include <assert.h>
 
+#include "memory_pool.hpp"
+
 t_accept_handler global_accept_handler = NULL;
 t_read_handler global_read_handler = NULL;
 t_write_handler global_write_handler = NULL;
 
 int server_fd = 0, epoll_fd = 0;
 epoll_event *events = NULL;
+memory_pool *pool = NULL;
 
 static void check_errors(const char *message, int result)
 {
@@ -40,36 +43,49 @@ static int make_socket_non_blocking (int sfd)
     return 0;
 }
 
-static void reallocate_buffer_with_increased_size(connection_data *connection)
+static void reallocate_buffer_exp(buffer *data)
 {
-	size_t new_size = 2 * connection->size;
-	assert(new_size <= MAXLEN);
+	assert(data->size == data->capacity);
+	data->capacity = 2 * data->capacity;
 
-	connection->data = (char *) realloc(connection->data, new_size);
-	assert(connection->data != NULL);
-	connection->size = new_size;
+//	data->bytes = (char *) realloc(data->bytes, data->capacity);
+	data->bytes = (char *) reallocate(pool, data->capacity, data->capacity/2, data->bytes);
+	assert(data->bytes != NULL);
+	logger_.log("Buffer reallocation. Capacity increased from %d B to %d B", data->size,
+				data->capacity);
+}
+
+static int allocate_buffer(buffer *data)
+{
+	data->capacity = STARTLEN;
+
+	data->bytes = (char*) callocate(pool, data->capacity);
+	assert(data->bytes != NULL);
+	data->start = 0;
+	data->size = 0;
+	return 0;
+}
+
+static void free_buffer(buffer *)
+{
 }
 
 static connection_data *allocate_connection(int client_fd)
 {
-	connection_data* connection = (connection_data*) calloc(1, sizeof(connection_data));
-	assert(connection->from == 0);
-
-	connection->size = STARTLEN;
-	connection->data = (char*) calloc(1, connection->size);
+    connection_data* connection = (connection_data*) callocate(pool, sizeof(connection_data));
 	connection->fd = client_fd;
+	allocate_buffer(&connection->data);
 	return connection;
 }
 
 static void free_connection(connection_data *connection)
 {
 	close(connection->fd);
-	free(connection->data);
-	free(connection);
-	connection = NULL;
+	free_buffer(&connection->data);
 }
 
-static void modify_epoll_context(int epoll_fd, int operation, int client_fd, uint32_t events, void *data)
+static void modify_epoll_context(int epoll_fd, int operation, int client_fd,
+								 uint32_t events, void *data)
 {
     epoll_event event;
     event.events = events | EPOLLET;
@@ -100,44 +116,80 @@ static int resolve_name_and_bind (int port)
 
 static void handle_reading_data_from_event(connection_data *connection)
 {
-	assert((size_t)connection->from <= connection->size);
-	int n = read(connection->fd, connection->data + connection->from, connection->size - connection->from);
+	buffer *data = &connection->data;
+	data->size = 0;
 
-    if(n == 0)
-    {
-		free_connection(connection);
+	while (true)
+	{
+		if (data->size == data->capacity)
+			reallocate_buffer_exp(data);
 
-        if (global_read_handler != NULL)
-			global_read_handler(n, NULL);
-    }
-    else
-    {
-        assert(n > 0);
-        connection->length = n;
+		int n = read(connection->fd, data->bytes + data->size,
+					 data->capacity - data->size);
 
-        if (global_read_handler != NULL)
-			global_read_handler(n, connection);
-    }
+		if (n == -1)
+		{
+			assert(errno == EAGAIN);
+			break;
+		}
+		else
+		if(n == 0)
+		{
+			free_connection(connection);
+
+			if (global_read_handler != NULL)
+				global_read_handler(n, NULL);
+			logger_.log("Error during reading. Connection was closed");
+			return;
+		}
+		else
+		{
+			assert(n > 0);
+			data->size += n;
+		}
+	}
+
+	if (global_read_handler != NULL)
+		global_read_handler(data->size, connection);
 }
 
 static void handle_writing_data_to_event(connection_data *connection)
 {
-	assert(connection->length + connection->from <= (int)connection->size);
-	int n = write(connection->fd, connection->data + connection->from, connection->length);
+	buffer *data = &connection->data;
+	//assert(data->start <= data->capacity);
+	// send whole buffer in one call
+	size_t start = 0;
 
-    assert( !((n == -1 && errno == EINTR) || (n < connection->length)) );
-    if(n == -1)
-    {
-		free_connection(connection);
+	while (true)
+	{
+		int n = write(connection->fd, data->bytes + start, data->size - start);
 
-        if (global_write_handler != NULL)
-			global_write_handler(n, NULL);
-    }
-    else
-    {
-        if (global_write_handler != NULL)
-			global_write_handler(n, connection);
-    }
+		assert( !((n == -1 && errno == EINTR)) );
+
+		if (n != -1)
+		{
+			assert(n > 0 && (n <= (int)data->size) );
+			start += n;
+			if (start == data->size)
+				break;
+		}
+		else
+			if (n == -1)
+			{
+				if (errno == EAGAIN)
+					break;
+
+				free_connection(connection);
+
+				if (global_write_handler != NULL)
+					global_write_handler(n, NULL);
+				logger_.log("Error during writing. Connection was closed");
+				return;
+			}
+	}
+
+	if (global_write_handler != NULL)
+		global_write_handler(data->size, connection);
 }
 
 static void handle_closing(connection_data *connection)
@@ -175,6 +227,10 @@ static void handle_accepting_connection(int server_fd)
 
 void init(int port)
 {
+    pool = ( memory_pool *) malloc(sizeof(memory_pool));
+    init_pool(pool);
+    logger_.log("Memory pool is ready");
+
     server_fd = resolve_name_and_bind(port);
 
     int return_code = listen (server_fd, MAXCONN);
@@ -185,7 +241,7 @@ void init(int port)
 
     modify_epoll_context(epoll_fd, EPOLL_CTL_ADD, server_fd, EPOLLIN, &server_fd);
     events = (epoll_event *)calloc(MAXEVENTS, sizeof(epoll_event));
-	logger_.log("Waiting for connections on port = %d...", port);
+    logger_.log("Event loop is ready. Waiting for connections on port = %d...", port);
 }
 
 void run()
@@ -238,6 +294,11 @@ void run()
 
     free(events);
 	events = NULL;
+    logger_.log("Events are destroyed");
+
+    destroy_pool(pool);
+    free(pool);
+    logger_.log("Memory pool is destroyed");
 }
 
 void async_accept( t_accept_handler accept_handler )
@@ -259,9 +320,9 @@ void async_read( t_read_handler read_handler, connection_data *connection)
 }
 
 /*
- * Writes all data available in connection buffer (connection->length bytes) to kernel. There is no message concept
+ * Writes all data available in connection buffer (connection->size bytes) to kernel. There is no message concept
    so from sender POV all data may be send in many calls (by async_write) but from reciever POV only one async_read
-   may be sufficient (and vice versa). If caller won't move connection->from and connection->length
+   may be sufficient (and vice versa). If caller won't move connection->from and connection->size
    next async_write send excatly the same data (but as I noticed behaviour on receiver side may be different).
  */
 void async_write( t_write_handler write_handler, connection_data *connection)

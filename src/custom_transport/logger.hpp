@@ -40,8 +40,8 @@ private:
 	const bool write_to_file, write_date;
 	bool opened {false};
 	bool in_place;
-	static const int max_log_size = 128;
-	char buffer[max_log_size];
+	static const int max_line_size = 600;
+	char buffer[max_line_size];
 	FILE * file_proxy = nullptr;
 	std::mutex mutex;
 };

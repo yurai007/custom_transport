@@ -6,17 +6,26 @@
 
 #define MAXCONN 200
 #define MAXEVENTS 128
-//#define MAXLEN (1024*1024*128)
 #define MAXLEN (1024u*1024u)
 #define STARTLEN (512u)
+
+/**
+ * buffer used to store incoming / outgoing data per connection.
+ * It's dynamically allocated chunk of memory in which capacity grows expotentialy.
+ * Start is extra information puts by connection.
+*/
+struct buffer
+{
+	size_t capacity;
+	size_t start, size;
+	char *bytes;
+};
 
 struct connection_data
 {
     int fd;
     uint32_t event;
-	char *data;
-	int length, from;
-	size_t size;
+	buffer data;
 };
 
 typedef std::function<void(int error, connection_data *,
