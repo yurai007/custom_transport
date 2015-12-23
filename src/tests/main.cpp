@@ -7,6 +7,9 @@
 #include <boost/assign/list_of.hpp>
 #include <functional>
 #include "../custom_transport/logger.hpp"
+#include <signal.h>
+#include <unistd.h>
+#include <cstring>
 
 /*
  * boost::asio::read/write read/write all data and works synchronously so it's perfect for
@@ -64,9 +67,9 @@
 
  * for offline work I must pass to query tcp::resolver::query::canonical_name
 
-
   TO DO: 
-   - SIGINT/SIGTERM is not handled in echo_server so resources aren't free. Handle signals!
+   - valgrind reports 1068 allocs for stress_test__2k_clients.
+	 But it should be only 266 on custom_transport level. Check it.
    - server must be restarted every time
    - gdb in qtcreator for root?
    - semaphores instead sleep(1)
@@ -538,16 +541,6 @@ void stress_test__2k_clients_increased_size_requests()
 	clients_pool.run();
 }
 
-void dummy_test_case()
-{
-    // mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f6da5ccd000
-    long *ptr = (long*)malloc(sizeof(long));
-
-    // munmap(0x7f6da5cd0000, 150562) - it unmaps all mappings at once
-    free(ptr);
-}
-
-
 void tests()
 {
 //	auto server_process = execute(
@@ -569,6 +562,7 @@ void tests()
 
 	logger_.log("All tests passed");
 }
+
 
 }
 

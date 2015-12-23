@@ -1,17 +1,18 @@
 #include "custom_transport.hpp"
 #include "logger.hpp"
-#include <stdio.h>
+#include <cstdio>
+#include <cstring>
+#include <cassert>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
-#include <string.h>
 #include <errno.h>
 #include <netinet/in.h>
-#include <stdlib.h>
+#include <cstdlib>
 #include <unistd.h>
 #include <fcntl.h>
 #include <netdb.h>
-#include <assert.h>
+#include <signal.h>
 
 #include "memory_pool.hpp"
 
@@ -22,6 +23,7 @@ t_write_handler global_write_handler = NULL;
 int server_fd = 0, epoll_fd = 0;
 epoll_event *events = NULL;
 memory_pool *pool = NULL;
+volatile bool interrupted = false;
 
 static void check_errors(const char *message, int result)
 {
@@ -35,7 +37,7 @@ static void check_errors(const char *message, int result)
 static int make_socket_non_blocking (int sfd)
 {
     int flags = fcntl (sfd, F_GETFL, 0);
-    check_errors("fcntl", flags);
+	check_errors("fcntl", flags);
 
     flags |= O_NONBLOCK;
     int s = fcntl (sfd, F_SETFL, flags);
@@ -92,7 +94,7 @@ static void modify_epoll_context(int epoll_fd, int operation, int client_fd,
     event.data.ptr = data;
 
     int return_code = epoll_ctl(epoll_fd, operation, client_fd, &event);
-    check_errors("epoll_ctl", return_code);
+	check_errors("epoll_ctl", return_code);
 }
 
 static int resolve_name_and_bind (int port)
@@ -225,6 +227,11 @@ static void handle_accepting_connection(int server_fd)
 		global_accept_handler(error_code, connection, client_address, client_port);
 }
 
+static void interrupt_handler(int , siginfo_t *, void *)
+{
+	interrupted = true;
+}
+
 void init(int port)
 {
     pool = ( memory_pool *) malloc(sizeof(memory_pool));
@@ -241,15 +248,29 @@ void init(int port)
 
     modify_epoll_context(epoll_fd, EPOLL_CTL_ADD, server_fd, EPOLLIN, &server_fd);
     events = (epoll_event *)calloc(MAXEVENTS, sizeof(epoll_event));
+
+	struct sigaction action;
+	memset(&action, 0, sizeof(action));
+	sigemptyset(&action.sa_mask);
+	action.sa_sigaction = &interrupt_handler;
+	action.sa_flags = SA_SIGINFO;
+
+	return_code = sigaction(SIGINT, &action, NULL);
+	check_errors("sigaction SIGINT", return_code);
+
+	return_code = sigaction(SIGTERM, &action, NULL);
+	check_errors("sigaction SIGTERM", return_code);
+
     logger_.log("Event loop is ready. Waiting for connections on port = %d...", port);
 }
 
 void run()
 {
-    while(true)
+	while(!interrupted)
     {
         int n = epoll_wait(epoll_fd, events, MAXEVENTS, -1);
-        check_errors("epoll_wait", n);
+		// TO DO: epoll_wait may be interrupted here but check_errors exit(-1)
+		//check_errors("epoll_wait", n);
 
         for(int i = 0; i < n; i++)
         {
@@ -292,13 +313,13 @@ void run()
         }
     }
 
-    free(events);
+	free(events);
 	events = NULL;
-    logger_.log("Events are destroyed");
+	logger_.log("Events are destroyed");
 
-    destroy_pool(pool);
-    free(pool);
-    logger_.log("Memory pool is destroyed");
+	destroy_pool(pool);
+	free(pool);
+	logger_.log("Memory pool is destroyed");
 }
 
 void async_accept( t_accept_handler accept_handler )

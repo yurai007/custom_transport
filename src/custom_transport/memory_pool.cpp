@@ -12,18 +12,20 @@ void init_pool(memory_pool *pool)
 void destroy_pool(memory_pool *pool)
 {
 	assert(pool != NULL);
-	small_chunk *current_small = pool->small_list;
+	small_chunk *previous_small = pool->small_list;
 	while (pool->small_list != NULL)
 	{
-		pool->small_list = current_small->next;
-		free(current_small);
+		previous_small = pool->small_list;
+		pool->small_list = pool->small_list->next;
+		free(previous_small);
 	}
 
-	big_chunk *current_big = pool->big_list;
+	big_chunk *previous_big = pool->big_list;
 	while (pool->big_list != NULL)
 	{
-		pool->big_list = current_big->next;
-		free(current_big);
+		previous_big = pool->big_list;
+		pool->big_list = pool->big_list->next;
+		free(previous_big);
 	}
 }
 
@@ -93,9 +95,6 @@ void *reallocate(memory_pool *pool, size_t request_size, size_t old_request_size
 
 	if (old_request_size >= sizeof(pool->small_list->bytes) / 4)
 	{
-		// TO DO: check in glibc implementation where this value is stored
-		// old_req_size = magic value - offsetof( big_chunk, bytes)
-		// + ifdef for glibc versions
 		destroy_chunk(pool, ptr);
 	}
 	return new_ptr;

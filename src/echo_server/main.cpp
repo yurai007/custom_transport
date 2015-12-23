@@ -43,6 +43,9 @@
    binary size is only ~30kB so as small as without std::function
 
  * std::function solves problem with bind to function pointer conversion
+
+ * use sigaction call for signal handling. Signal handler should be as small and simple as possible.
+   I shouldn't use logger in signal handler because log is not reentrant.
 */
 
 void read_handler(int bytes_transferred, connection_data *connection);
