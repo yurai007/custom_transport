@@ -137,11 +137,11 @@ static void handle_reading_data_from_event(connection_data *connection)
 		else
 		if(n == 0)
 		{
+			logger_.log("Error during reading. Connection was closed on %d", connection->fd);
 			free_connection(connection);
 
 			if (global_read_handler != NULL)
 				global_read_handler(n, NULL);
-			logger_.log("Error during reading. Connection was closed");
 			return;
 		}
 		else
@@ -181,11 +181,11 @@ static void handle_writing_data_to_event(connection_data *connection)
 				if (errno == EAGAIN)
 					break;
 
+				logger_.log("Error during writing. Connection was closed on %d", connection->fd);
 				free_connection(connection);
 
 				if (global_write_handler != NULL)
 					global_write_handler(n, NULL);
-				logger_.log("Error during writing. Connection was closed");
 				return;
 			}
 	}

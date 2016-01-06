@@ -67,7 +67,15 @@
 
  * for offline work I must pass to query tcp::resolver::query::canonical_name
 
+ * it looks like boost::asio::async_read with boost::asio::buffer(connection_buffers[client_id], N) always 'waits'
+   for N bytes. Form the other hand async_read_some waits for at least 1B.
+
+ * for ./tests POV in asynchronous_clients_set and stress_test__one_big_request_async
+   we have sequenece of non-blocking sendmsg(65536) and recvmsg(65536)
+
   TO DO: 
+   - why in stress_test__one_big_request_async I don't get full msg during async_read?? Server logs report that
+	 this msg is sent back to client (2.8MB)??? WTF??
    - valgrind reports 1068 allocs for stress_test__2k_clients.
 	 But it should be only 266 on custom_transport level. Check it.
    - server must be restarted every time
@@ -150,7 +158,7 @@ public:
 							 std::function<int(std::vector<unsigned char>
 																	&connection_buffer, const int client_id)> test_send_handler,
 
-							 std::function<void(const std::vector<unsigned char>
+							 std::function<bool(const std::vector<unsigned char>
 										 &connection_buffer, const int recieved_bytes, const int client_id)> test_read_handler
 							 )
 		: clients_number(clients_number_),
@@ -189,12 +197,44 @@ public:
 
 private:
 
+	//void write_handler(const boost::system::error_code &error_code, size_t bytes_transferred, int client_id);
+
+	void read_handler(const boost::system::error_code &error_code, size_t bytes_transferred, int client_id)
+	{
+		if (!error_code)
+		{
+			logger_.log("read_handler: %d B was recieved", bytes_transferred);
+			const bool conversation_end = external_read_handler(connection_buffers[client_id], bytes_transferred, client_id);
+			if (conversation_end)
+				return;
+
+			int size = external_send_handler(connection_buffers[client_id], client_id);
+
+			boost::asio::async_write(sockets[client_id],
+					boost::asio::buffer(connection_buffers[client_id], size),
+					boost::bind(&asynchronous_clients_set::write_handler, this, boost::asio::placeholders::error,
+								boost::asio::placeholders::bytes_transferred, client_id));
+		}
+		else
+		{
+			assert(false);
+		}
+	}
+
 	void write_handler(const boost::system::error_code &error_code, size_t bytes_transferred, int client_id)
 	{
 		if (!error_code)
 		{
 			assert(bytes_transferred > 0);
-			external_read_handler(connection_buffers[client_id], bytes_transferred, client_id);
+			logger_.log("write_handler: %d B was send", bytes_transferred);
+
+			boost::asio::async_read(sockets[client_id], boost::asio::buffer(connection_buffers[client_id], bytes_transferred),
+									boost::bind(&asynchronous_clients_set::read_handler, this, boost::asio::placeholders::error,
+												boost::asio::placeholders::bytes_transferred, client_id));
+
+//			sockets[client_id].async_read_some(boost::asio::buffer(connection_buffers[client_id], 256),
+//									boost::bind(&asynchronous_clients_set::read_handler, this, boost::asio::placeholders::error,
+//												boost::asio::placeholders::bytes_transferred, client_id));
 		}
 		else
 			assert(false);
@@ -250,7 +290,7 @@ private:
 	const std::function<int(std::vector<unsigned char>
 										   &connection_buffer, const int client_id)> external_send_handler {nullptr};
 
-	const std::function<void(const std::vector<unsigned char>
+	const std::function<bool(const std::vector<unsigned char>
 				&connection_buffer, const int recieved_bytes, const int client_id)> external_read_handler {nullptr};
 
     int client_id;
@@ -386,7 +426,9 @@ void stress_test__one_big_request_async()
 			if (sum_bytes == big_request.size())
 			{
 				logger_.log("OK. Recieved all %d bytes", sum_bytes);
+				return true;
 			}
+		return false;
 	};
 
 	asynchronous_clients_set clients_pool("127.0.0.1", "5555", 1, max_buffer_size, client_send_handler,
@@ -496,6 +538,8 @@ void stress_test__2k_clients()
 		const std::string response(connection_buffer.begin(), connection_buffer.begin() + recieved_bytes);
 
 		assert(response == expected_response);
+		logger_.log("OK. Recieved echo response from client %d.", client_id);
+		return true;
 	};
 
 	asynchronous_clients_set clients_pool("127.0.0.1", "5555", 2000, max_buffer_size, client_send_handler,
@@ -534,12 +578,20 @@ void stress_test__2k_clients_increased_size_requests()
 		const std::string response(connection_buffer.begin(), connection_buffer.begin() + recieved_bytes);
 
 		assert(response == client_requests[client_id]);
+		if ( client_requests[client_id].size() < 100 )
+		{
+			client_requests[client_id] += '*';
+			return false;
+		}
+		return true;
 	};
 
 	asynchronous_clients_set clients_pool("127.0.0.1", "5555", clients_number, max_buffer_size, client_send_handler,
 										  client_recv_handler);
 	clients_pool.run();
 }
+
+// TO DO: finish asynchronous_clients_set. Check under strace if sendmsg and recv are called!
 
 void tests()
 {
@@ -550,15 +602,17 @@ void tests()
 //	sleep(1);
 
 
-	dummy_test1();
-	dummy_test2();
+//	dummy_test1();
+//	dummy_test2();
 	stress_test__one_big_request_async();
-	stress_test__many_small_requests();
-	stress_test__increased_size_requests();
-	stress_test__increased_size_big_requests();
-	stress_test__2k_clients();
+//	stress_test__many_small_requests();
+//	stress_test__increased_size_requests();
+//	stress_test__increased_size_big_requests();
+//	stress_test__2k_clients();
 
 //	terminate(server_process);
+
+//	stress_test__2k_clients_increased_size_requests();
 
 	logger_.log("All tests passed");
 }
