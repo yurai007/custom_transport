@@ -73,9 +73,15 @@
  * for ./tests POV in asynchronous_clients_set and stress_test__one_big_request_async
    we have sequenece of non-blocking sendmsg(65536) and recvmsg(65536)
 
+ * strace -e trace=network -o out.strace ./echo_server 5555 and
+   strace -e trace=network -o out.strace ./tests
+   has significant overhead and problems with blocking tests/async_read disappears
+
   TO DO: 
-   - why in stress_test__one_big_request_async I don't get full msg during async_read?? Server logs report that
-	 this msg is sent back to client (2.8MB)??? WTF??
+   - I have no idea why ./tests sometimes hang on async_read and sometimes not.
+	 Wireshark may help. Under wireshark we can see that server get all data but not all data are send back.
+	 On localhost MCU = 65536.
+
    - valgrind reports 1068 allocs for stress_test__2k_clients.
 	 But it should be only 266 on custom_transport level. Check it.
    - server must be restarted every time
@@ -118,17 +124,38 @@ public:
 		logger_.log("synchronous_client::  Sent %d bytes", send_bytes);
 	}
 
+	// blocks until read excatly expected_bytes B
+	std::string read(size_t expected_bytes)
+	{
+		assert(expected_bytes <= max_buffer_size);
+		boost::system::error_code error;
+		static std::array<char, max_buffer_size> data;
+
+		logger_.log("synchronous_client::  Start recieving...");
+		size_t recieved_bytes = boost::asio::read(socket, boost::asio::buffer(data, expected_bytes),
+												  error);
+
+		assert(!error);
+		assert(recieved_bytes > 0 && expected_bytes == recieved_bytes);
+
+		logger_.log("synchronous_client::  Recieved %d bytes", recieved_bytes);
+		std::string result(data.begin(), data.begin() + recieved_bytes);
+		return result;
+	}
+
+	// blocks until read at least 1B
 	std::string read()
 	{
 		boost::system::error_code error;
 		static std::array<char, max_buffer_size> data;
 
 		logger_.log("synchronous_client::  Start recieving...");
-		// TO DO: for some reason read_some doesn't recieve all data and blocks for one_big_request
+		/* TO DO: I use here read_some only because in this point I have no idea how many data
+				  I want to read. Using sth like
+				  size_t recieved_bytes = boost::asio::read(socket, boost::asio::buffer(data), error);
+				  ofc will hang whole thread because we don't expect max_buffer_size bytes in data
+		*/
 		size_t recieved_bytes = socket.read_some(boost::asio::buffer(data), error);
-//		TO DO: why does it block?
-		//size_t recieved_bytes = boost::asio::read(socket, boost::asio::buffer(data), error);
-		//logger_.log("synchronous_client::  Error_code: %d", error.value());
 
 		assert(!error);
 		assert(recieved_bytes > 0);
@@ -231,10 +258,6 @@ private:
 			boost::asio::async_read(sockets[client_id], boost::asio::buffer(connection_buffers[client_id], bytes_transferred),
 									boost::bind(&asynchronous_clients_set::read_handler, this, boost::asio::placeholders::error,
 												boost::asio::placeholders::bytes_transferred, client_id));
-
-//			sockets[client_id].async_read_some(boost::asio::buffer(connection_buffers[client_id], 256),
-//									boost::bind(&asynchronous_clients_set::read_handler, this, boost::asio::placeholders::error,
-//												boost::asio::placeholders::bytes_transferred, client_id));
 		}
 		else
 			assert(false);
@@ -250,10 +273,10 @@ private:
 
 			int size = external_send_handler(connection_buffers[client_id-1], client_id-1);
 
-			boost::asio::async_write(sockets[client_id-1],
-					boost::asio::buffer(connection_buffers[client_id-1], size),
-					boost::bind(&asynchronous_clients_set::write_handler, this, boost::asio::placeholders::error,
-								boost::asio::placeholders::bytes_transferred, client_id-1));
+//			boost::asio::async_write(sockets[client_id-1],
+//					boost::asio::buffer(connection_buffers[client_id-1], size),
+//					boost::bind(&asynchronous_clients_set::write_handler, this, boost::asio::placeholders::error,
+//								boost::asio::placeholders::bytes_transferred, client_id-1));
 		}
 		else
 		{
@@ -308,11 +331,11 @@ void dummy_test1()
 
 	synchronous_client client("127.0.0.1", "5555");
 	client.send(request1);
-	assert(client.read() == request1);
+	assert(client.read(request1.size()) == request1);
 	client.send(request2);
-	assert(client.read() == request2);
+	assert(client.read(request2.size()) == request2);
 	client.send(request3);
-	assert(client.read() == request3);
+	assert(client.read(request3.size()) == request3);
 }
 
 void dummy_test2()
@@ -368,7 +391,7 @@ void stress_test__one_big_request()
 	}
 }
 
-// request size about ~2.9MB
+// request size about ~2.8MB
 void stress_test__one_big_request_async()
 {
 	logger_.log("stress_test__one_big_request_async is starting");
@@ -383,10 +406,12 @@ void stress_test__one_big_request_async()
 		if (!once)
 		{
 			once = true;
-			const std::string request_fragment = "0123456789101112131415161718";
+			const std::string request_fragment = "0123456789101112131ABC";
 
-			for (int i = 0; i < 100000; i++)
+			for (int i = 0; i < 100000; i++) {
 				big_request.append(request_fragment);
+				big_request.append(std::to_string(i) += "XYZ");
+			}
 
 			assert(big_request.size() <= max_buffer_size);
 
@@ -407,10 +432,12 @@ void stress_test__one_big_request_async()
 		if (!once)
 		{
 			once = true;
-			const std::string request_fragment = "0123456789101112131415161718";
+			const std::string request_fragment = "0123456789101112131ABC";
 
-			for (int i = 0; i < 100000; i++)
+			for (int i = 0; i < 100000; i++) {
 				big_request.append(request_fragment);
+				big_request.append(std::to_string(i) += "XYZ");
+			}
 
 			assert(big_request.size() <= max_buffer_size);
 		}
@@ -524,25 +551,25 @@ void stress_test__2k_clients()
 	const auto client_send_handler = [](std::vector<unsigned char>
 			&connection_buffer, const int client_id)
 	{
-		const std::string request = "Hello world from client = " + std::to_string(client_id) + " !";
+//		const std::string request = "Hello world from client = " + std::to_string(client_id) + " !";
 
-		assert(request.size() <= max_buffer_size);
-		auto last = std::copy(request.begin(), request.end(), connection_buffer.begin());
-		return std::distance(connection_buffer.begin(), last);
+//		assert(request.size() <= max_buffer_size);
+//		auto last = std::copy(request.begin(), request.end(), connection_buffer.begin());
+		return true; //std::distance(connection_buffer.begin(), last);
 	};
 
 	const auto client_recv_handler = [](const std::vector<unsigned char>
 			&connection_buffer, const int recieved_bytes, const int client_id)
 	{
-		const std::string expected_response= "Hello world from client = " + std::to_string(client_id) + " !";
-		const std::string response(connection_buffer.begin(), connection_buffer.begin() + recieved_bytes);
+//		const std::string expected_response= "Hello world from client = " + std::to_string(client_id) + " !";
+//		const std::string response(connection_buffer.begin(), connection_buffer.begin() + recieved_bytes);
 
-		assert(response == expected_response);
-		logger_.log("OK. Recieved echo response from client %d.", client_id);
+//		assert(response == expected_response);
+//		logger_.log("OK. Recieved echo response from client %d.", client_id);
 		return true;
 	};
 
-	asynchronous_clients_set clients_pool("127.0.0.1", "5555", 2000, max_buffer_size, client_send_handler,
+	asynchronous_clients_set clients_pool("127.0.0.1", "5555", 3000, max_buffer_size, client_send_handler,
 										  client_recv_handler);
 	clients_pool.run();
 }
@@ -591,7 +618,6 @@ void stress_test__2k_clients_increased_size_requests()
 	clients_pool.run();
 }
 
-// TO DO: finish asynchronous_clients_set. Check under strace if sendmsg and recv are called!
 
 void tests()
 {
@@ -604,11 +630,12 @@ void tests()
 
 //	dummy_test1();
 //	dummy_test2();
-	stress_test__one_big_request_async();
+//	stress_test__one_big_request();
+//	stress_test__one_big_request_async();
 //	stress_test__many_small_requests();
 //	stress_test__increased_size_requests();
 //	stress_test__increased_size_big_requests();
-//	stress_test__2k_clients();
+	stress_test__2k_clients();
 
 //	terminate(server_process);
 

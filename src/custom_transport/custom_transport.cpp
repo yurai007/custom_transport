@@ -23,6 +23,7 @@ t_write_handler global_write_handler = NULL;
 int server_fd = 0, epoll_fd = 0;
 epoll_event *events = NULL;
 memory_pool *pool = NULL;
+size_t connections = 0;
 volatile bool interrupted = false;
 
 static void check_errors(const char *message, int result)
@@ -155,43 +156,64 @@ static void handle_reading_data_from_event(connection_data *connection)
 		global_read_handler(data->size, connection);
 }
 
-static void handle_writing_data_to_event(connection_data *connection)
+static bool handle_writing_data_to_event(connection_data *connection)
 {
 	buffer *data = &connection->data;
-	//assert(data->start <= data->capacity);
-	// send whole buffer in one call
-	size_t start = 0;
+	assert(data->start <= data->capacity);
 
 	while (true)
 	{
-		int n = write(connection->fd, data->bytes + start, data->size - start);
+		int n = write(connection->fd, data->bytes + data->start, data->size - data->start);
+		//logger_.log("%d B was written", n); // <--- this is the greatest WTF I have ever seen :(
 
 		assert( !((n == -1 && errno == EINTR)) );
 
 		if (n != -1)
 		{
 			assert(n > 0 && (n <= (int)data->size) );
-			start += n;
-			if (start == data->size)
+			data->start += n;
+			if (data->start == data->size)
 				break;
 		}
 		else
 			if (n == -1)
 			{
+				// TO DO:
+				// EAGAIN means that we cannot send more data now (because of e.g full recv buffer on client side)
+				// but there are some data to send. So we should break loop but before that
+				// remember state and modify epoll context for writing like:
+				// modify_epoll_context(epoll_fd, EPOLL_CTL_ADD, connection->fd, EPOLLOUT, connection);
+
+				// Now we have spin loop here but we just want to sleep in epoll_wait.
 				if (errno == EAGAIN)
-					break;
+				{
+					// we leave data->start as it is
+					return false;
+				}
 
 				logger_.log("Error during writing. Connection was closed on %d", connection->fd);
 				free_connection(connection);
 
 				if (global_write_handler != NULL)
 					global_write_handler(n, NULL);
-				return;
+
+				data->start = 0;
+				return true;
 			}
 	}
 
+	if (data->start != data->size)
+	{
+		logger_.log("start = %zu, data->size = %zu!", data->start, data->size);
+		assert(false);
+	}
+
+
 	if (global_write_handler != NULL)
 		global_write_handler(data->size, connection);
+
+	data->start = 0;
+	return true;
 }
 
 static void handle_closing(connection_data *connection)
@@ -222,6 +244,8 @@ static void handle_accepting_connection(int server_fd)
 
     make_socket_non_blocking(client_fd);
 	connection_data *connection = allocate_connection(client_fd);
+
+	connections++;
 
     if (global_accept_handler != NULL)
 		global_accept_handler(error_code, connection, client_address, client_port);
@@ -307,11 +331,17 @@ void run()
                     connection->event = EPOLLOUT;
                     modify_epoll_context(epoll_fd, EPOLL_CTL_DEL, connection->fd, 0, 0);
 
-					handle_writing_data_to_event(connection);
+					if (!handle_writing_data_to_event(connection))
+					{
+						modify_epoll_context(epoll_fd, EPOLL_CTL_ADD, connection->fd, EPOLLOUT,
+											 connection);
+					}
                 }
             }
         }
     }
+
+	logger_.log("Accepted %d connections", connections);
 
 	free(events);
 	events = NULL;
@@ -349,6 +379,6 @@ void async_read( t_read_handler read_handler, connection_data *connection)
 void async_write( t_write_handler write_handler, connection_data *connection)
 {
     assert(connection != NULL && epoll_fd != 0);
-    modify_epoll_context(epoll_fd, EPOLL_CTL_ADD, connection->fd, EPOLLOUT, connection);
+	modify_epoll_context(epoll_fd, EPOLL_CTL_ADD, connection->fd, EPOLLOUT, connection);
     global_write_handler = write_handler;
 }
