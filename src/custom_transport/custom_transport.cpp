@@ -101,9 +101,13 @@ static void modify_epoll_context(int epoll_fd, int operation, int client_fd,
 static int resolve_name_and_bind (int port)
 {
     sockaddr_in server_addr;
+    const int opt = 1;
 
     int server_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
     check_errors("socket", server_fd);
+
+    int return_code = setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(int));
+    check_errors("socket", return_code);
 
     bzero(&server_addr, sizeof(server_addr));
 
@@ -111,7 +115,7 @@ static int resolve_name_and_bind (int port)
     server_addr.sin_port = htons(port);
     server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-    int return_code = bind(server_fd, (sockaddr*)&server_addr, sizeof(server_addr));
+    return_code = bind(server_fd, (sockaddr*)&server_addr, sizeof(server_addr));
     check_errors("bind", return_code);
 
     return server_fd;
@@ -138,7 +142,8 @@ static void handle_reading_data_from_event(connection_data *connection)
 		else
 		if(n == 0)
 		{
-			logger_.log("Error during reading. Connection was closed on %d", connection->fd);
+
+            logger_.log("Error during reading. Connection was closed on %d", connection->fd);
 			free_connection(connection);
 
 			if (global_read_handler != NULL)
@@ -251,6 +256,43 @@ static void handle_accepting_connection(int server_fd)
 		global_accept_handler(error_code, connection, client_address, client_port);
 }
 
+static void new_handle_accepting_connection(int server_fd, struct epoll_event &client_event,
+                                            struct epoll_event &server_event)
+{
+    sockaddr_in clientaddr;
+    socklen_t clientlen = sizeof(clientaddr);
+
+    int client_fd = accept(server_fd, (sockaddr*)&clientaddr, &clientlen);
+    assert(client_fd > 0 || (client_fd == -1 && errno == EAGAIN));
+
+    if (client_fd > 0)
+    {
+        char client_address[NI_MAXHOST], client_port[NI_MAXSERV];
+        int error_code = getnameinfo ((sockaddr*)&clientaddr, clientlen,
+                                      client_address, sizeof client_address,
+                                      client_port, sizeof client_port,
+                                      NI_NUMERICHOST | NI_NUMERICSERV);
+
+        make_socket_non_blocking(client_fd);
+        connection_data *connection = allocate_connection(client_fd);
+
+        connections++;
+
+//        epoll_event event;
+//        event.events = EPOLLIN | EPOLLET;
+//        event.data.ptr = connection;
+
+//        int return_code = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event);
+//        assert(return_code >= 0);
+
+        int return_code = epoll_ctl(epoll_fd, EPOLL_CTL_MOD, server_fd, &server_event);
+        assert(return_code >= 0);
+
+        if (global_accept_handler != NULL)
+            global_accept_handler(error_code, connection, client_address, client_port);
+    }
+}
+
 static void interrupt_handler(int , siginfo_t *, void *)
 {
 	interrupted = true;
@@ -271,6 +313,7 @@ void init(int port)
     check_errors("epoll_create", epoll_fd);
 
     modify_epoll_context(epoll_fd, EPOLL_CTL_ADD, server_fd, EPOLLIN, &server_fd);
+    modify_epoll_context(epoll_fd, EPOLL_CTL_MOD, server_fd, EPOLLIN, &server_fd);
     events = (epoll_event *)calloc(MAXEVENTS, sizeof(epoll_event));
 
 	struct sigaction action;
@@ -290,54 +333,68 @@ void init(int port)
 
 void run()
 {
+    int client_fd;
+    struct epoll_event client_event =
+    {
+        .events = EPOLLIN | EPOLLET,
+        .data = {.ptr = &client_fd}
+    };
+    struct epoll_event server_event =
+    {
+        .events = EPOLLIN | EPOLLET,
+        .data = {.ptr = &server_fd}
+    };
+
 	while(!interrupted)
     {
         int n = epoll_wait(epoll_fd, events, MAXEVENTS, -1);
-		// TO DO: epoll_wait may be interrupted here but check_errors exit(-1)
-		//check_errors("epoll_wait", n);
+        assert(n >= 0 || (n == -1 && errno == EINTR));
+
+        if (n == 0)
+        {
+            logger_.log("Timeout");
+            assert(false);
+        }
 
         for(int i = 0; i < n; i++)
         {
-            if(events[i].data.ptr == &server_fd)
+            if(EPOLLIN & events[i].events)
             {
-                if(events[i].events & EPOLLHUP || events[i].events & EPOLLERR)
+                if(events[i].data.ptr == &server_fd)
                 {
-                    handle_server_closing(server_fd);
-                    break;
+                    new_handle_accepting_connection(server_fd, client_event, server_event);
                 }
-
-				handle_accepting_connection(server_fd);
-            }
-            else
-            {
-                if(events[i].events & EPOLLHUP || events[i].events & EPOLLERR)
-                {
-                    connection_data* connection = (connection_data*) events[i].data.ptr;
-					handle_closing(connection);
-                }
-                else if(EPOLLIN & events[i].events)
+                else
                 {
                     connection_data* connection = (connection_data*) events[i].data.ptr;
 
                     connection->event = EPOLLIN;
                     modify_epoll_context(epoll_fd, EPOLL_CTL_DEL, connection->fd, 0, 0);
-
-					handle_reading_data_from_event(connection);
+                    handle_reading_data_from_event(connection);
                 }
-                else if(EPOLLOUT & events[i].events)
+            }
+            else
+                if(EPOLLOUT & events[i].events)
                 {
                     connection_data* connection = (connection_data*) events[i].data.ptr;
 
                     connection->event = EPOLLOUT;
                     modify_epoll_context(epoll_fd, EPOLL_CTL_DEL, connection->fd, 0, 0);
 
-					if (!handle_writing_data_to_event(connection))
-					{
-						modify_epoll_context(epoll_fd, EPOLL_CTL_ADD, connection->fd, EPOLLOUT,
-											 connection);
-					}
+                    if (!handle_writing_data_to_event(connection))
+                    {
+                        modify_epoll_context(epoll_fd, EPOLL_CTL_ADD, connection->fd, EPOLLOUT,
+                                             connection);
+                    }
                 }
-            }
+                else
+                {
+                    if(events[i].events & EPOLLHUP || events[i].events & EPOLLERR)
+                    {
+                        connection_data* connection = (connection_data*) events[i].data.ptr;
+                        handle_closing(connection);
+                    }
+                }
         }
     }
 

@@ -54,12 +54,12 @@ void write_handler(int bytes_transferred, connection_data *connection)
 {
 	if (bytes_transferred >= 0)
 	{
-		if (bytes_transferred <= 512)
-			logger_.log("Send back %d bytes. Send all data to client socket = %d: %.*s", bytes_transferred,
-					connection->fd, bytes_transferred, connection->data.bytes);
-		else
-			logger_.log("Send back %d bytes. Send all data to client socket = %d. ", bytes_transferred,
-					connection->fd);
+//        if (bytes_transferred <= 512)
+//            logger_.log("Send back %d bytes. Send all data to client socket = %d: %.*s", bytes_transferred,
+//                    connection->fd, bytes_transferred, connection->data.bytes);
+//        else
+//            logger_.log("Send back %d bytes. Send all data to client socket = %d. ", bytes_transferred,
+//                    connection->fd);
 		async_read(read_handler, connection);
 	}
 }
@@ -73,18 +73,18 @@ void read_handler(int bytes_transferred, connection_data *connection)
 {
 	if(bytes_transferred == 0)
 	{
-		logger_.log("Client closed connection. Detected in read_handler");
+        logger_.log("Client closed connection. Detected in read_handler");
 	}
 	else
 	{
-		if (bytes_transferred <= 512)
-			logger_.log("Recieved %d bytes. Data from client socket = %d: %.*s", bytes_transferred,
-					connection->fd, bytes_transferred, connection->data.bytes);
-		else
-			logger_.log("Recieved %d bytes. Data from client socket = %d. ", bytes_transferred,
-					connection->fd);
+//        if (bytes_transferred <= 512)
+//            logger_.log("Recieved %d bytes. Data from client socket = %d: %.*s", bytes_transferred,
+//                    connection->fd, bytes_transferred, connection->data.bytes);
+//        else
+//            logger_.log("Recieved %d bytes. Data from client socket = %d. ", bytes_transferred,
+//                    connection->fd);
 
-		prepare_echo_response(connection);
+        prepare_echo_response(connection);
 	}
 }
 
@@ -93,9 +93,9 @@ void accept_handler(int error, connection_data *connection,
 {
 	if (error == 0)
 	{
-		logger_.log("Accepted connection on descriptor %d "
-			   "(host=%s, port=%s)", connection->fd, address, port);
-		async_read(read_handler, connection);
+        logger_.log("Accepted connection on descriptor %d "
+               "(host=%s, port=%s)", connection->fd, address, port);
+        async_read(read_handler, connection);
 	}
 	else
 	{
