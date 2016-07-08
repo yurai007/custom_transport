@@ -3,15 +3,11 @@
 #include <array>
 #include <boost/asio.hpp>
 #include <boost/process.hpp>
-#include <boost/bind.hpp>
-#include <boost/assign/list_of.hpp>
 #include <functional>
 #include "../custom_transport/logger.hpp"
 #include <signal.h>
 #include <unistd.h>
 #include <cstring>
-#include <iostream>
-#include <queue>
 
 /*
  * boost::asio::read/write read/write all data and works synchronously so it's perfect for
@@ -22,7 +18,8 @@
    Ref: http://stackoverflow.com/questions/4068249/how-to-use-stdstring-with-asiobuffer
 
  * Boost process is not part of boost:) Boost Process is header only so linker will be happy.
-   Library is quite old and has many incompatible versions. I use version 0.5 from process.zip from SO:
+   Library is quite old and has many incompatible versions. I use version 0.5 from process.zip
+   from SO:
    http://stackoverflow.com/questions/1683665/where-is-boost-process
 
  * stress_test__one_big_request shows that one send may be mapped to many read-s on reciever side
@@ -35,7 +32,8 @@
 	 synchronous_client::  Recieved 21845 bytes
 	 synchronous_client::  Recieved 6155 bytes
 
-   The reason is that TCP models bytes stream, not packet/msg stream so 1 send -> many reads and vice versa.
+   The reason is that TCP models bytes stream, not packet/msg stream so 1 send -> many reads
+   and vice versa.
    .... OK I fixed that, I just call in test many reads and check if content is OK.
 
  * the problem is that I won't be have never big enaugh buffer on server side so situations that
@@ -61,9 +59,9 @@
    (ulimit -v 4000000; /opt/Qt5.4.2/Tools/QtCreator/bin/./qtcreator)
 
  * never ever use local static-s! However if you really want to use them think 10 times.
-   Local statics have limited scope but it's not like field with limited scope. There are much much worse
-   because introduce dependency between different object-s of the same type! I can create and destroy object but
-   part of state will be still hold in static.
+   Local statics have limited scope but it's not like field with limited scope.
+   There are much much worse because introduce dependency between different object-s of the same type!
+   I can create and destroy object but part of state will be still hold in static.
    This extreme memory consumpsion was caused by static buffer which was allocated only once (vector, wtf?)
    fo 16MB and after that (and after destroying object) was used in next test by coping 2000x times
 
@@ -72,7 +70,8 @@
 
  * for offline work I must pass to query tcp::resolver::query::canonical_name
 
- * it looks like boost::asio::async_read with boost::asio::buffer(connection_buffers[client_id], N) always 'waits'
+ * it looks like boost::asio::async_read with boost::asio::buffer(connection_buffers[client_id], N)
+   always 'waits'
    for N bytes. Form the other hand async_read_some waits for at least 1B.
 
  * for ./tests POV in asynchronous_clients_set and stress_test__one_big_request_async
@@ -113,13 +112,17 @@
     stress_test__4k_clients - fails always on 5-10 time both on debug and release build
     (even without logging - so it's not RC). Fails always with:
 
-    tests: ../../../src/tests/main.cpp:340: void echo_server_component_tests::asynchronous_clients_set::connect_handler(const boost::system::error_code&): Assertion `false' failed.
+    tests: ../../../src/tests/main.cpp:340: void echo_server_component_tests::asynchronous_clients_set
+                    ::connect_handler(const boost::system::error_code&): Assertion `false' failed.
     Aborted (core dumped)
 
     on client side
 
  * boost::asio::buffer is just lightweight wrapper on passing buffer. There is no copying here!
    Just a pointer to data!
+
+ * be careful with boost::bind to lambda. Boost::bind takes current values by copy (like client_id).
+   So I can't use this->client_id!
 */
 
 namespace echo_server_component_tests
@@ -263,8 +266,9 @@ public:
 		}
 
 		tcp::resolver::query query(ip_address, port, tcp::resolver::query::canonical_name);
-		resolver.async_resolve(query, boost::bind( &asynchronous_clients_set::accept_handler, this,
-					 boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred) );
+        resolver.async_resolve(query, [this](auto error_code, auto endpoint_iterator)
+                                    { this->accept_handler(error_code, endpoint_iterator); });
+
 		logger_.log("accept_handler was attached");
 	}
 
@@ -287,16 +291,17 @@ private:
 		if (!error_code)
 		{
 			logger_.log("read_handler: %d B was recieved", bytes_transferred);
-			const bool conversation_end = external_read_handler(connection_buffers[client_id], bytes_transferred, client_id);
+            const bool conversation_end = external_read_handler(connection_buffers[client_id],
+                                                                bytes_transferred, client_id);
 			if (conversation_end)
 				return;
 
 			int size = external_send_handler(connection_buffers[client_id], client_id);
 
 			boost::asio::async_write(sockets[client_id],
-					boost::asio::buffer(connection_buffers[client_id], size),
-					boost::bind(&asynchronous_clients_set::write_handler, this, boost::asio::placeholders::error,
-								boost::asio::placeholders::bytes_transferred, client_id));
+                                     boost::asio::buffer(connection_buffers[client_id], size),
+                                     [this, client_id](auto error_code, auto bytes_transferred){
+                                         this->write_handler(error_code, bytes_transferred, client_id);});
 		}
         else
         {
@@ -312,9 +317,10 @@ private:
 			assert(bytes_transferred > 0);
 			logger_.log("write_handler: %d B was send", bytes_transferred);
 
-			boost::asio::async_read(sockets[client_id], boost::asio::buffer(connection_buffers[client_id], bytes_transferred),
-									boost::bind(&asynchronous_clients_set::read_handler, this, boost::asio::placeholders::error,
-												boost::asio::placeholders::bytes_transferred, client_id));
+            boost::asio::async_read(sockets[client_id],
+                                    boost::asio::buffer(connection_buffers[client_id], bytes_transferred),
+                                    [this, client_id](auto error, auto bytes){
+                                        this->read_handler(error, bytes, client_id);});
 		}
 		else
         {
@@ -333,14 +339,11 @@ private:
 
 			int size = external_send_handler(connection_buffers[client_id-1], client_id-1);
 
+            auto id = client_id-1;
             boost::asio::async_write(sockets[client_id-1],
                     boost::asio::buffer(connection_buffers[client_id-1], size),
-                    boost::bind(&asynchronous_clients_set::write_handler, this, boost::asio::placeholders::error,
-                                boost::asio::placeholders::bytes_transferred, client_id-1));
-
-            // just for sure because we test echo
-//            auto it = connection_buffers[client_id-1].begin();
-//            std::fill(it, it + size, 0);
+                    [this, id](auto error_code, auto bytes_transferred){
+                            this->write_handler(error_code, bytes_transferred, id);});
 		}
 		else
 		{
@@ -356,8 +359,7 @@ private:
 		{
 			for (auto &socket : sockets)
 				socket.async_connect(*endpoint_iterator,
-									 boost::bind(&asynchronous_clients_set::connect_handler,
-												 this, boost::asio::placeholders::error));
+                                    [this](auto error_code){this->connect_handler(error_code);});
 		}
 		else
 		{
@@ -375,10 +377,13 @@ private:
 	std::vector<tcp::socket> sockets;
 
 	const std::function<int(std::vector<unsigned char>
-										   &connection_buffer, const int client_id)> external_send_handler {nullptr};
+                        &connection_buffer,
+                        const int client_id)> external_send_handler {nullptr};
 
 	const std::function<bool(const std::vector<unsigned char>
-				&connection_buffer, const int recieved_bytes, const int client_id)> external_read_handler {nullptr};
+                        &connection_buffer,
+                        const int recieved_bytes,
+                        const int client_id)> external_read_handler {nullptr};
 
     int client_id;
 };
@@ -462,7 +467,8 @@ void stress_test__one_big_request_async()
 
     constexpr static int max_buffer_size = 1024*1024*16;
 
-    const auto client_send_handler = [](std::vector<unsigned char> &connection_buffer, const int client_id)
+    const auto client_send_handler = [](std::vector<unsigned char> &connection_buffer,
+                                        const int client_id)
     {
         logger_.log("client_send_handler");
         static bool once = false;
